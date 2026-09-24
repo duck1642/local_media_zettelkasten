@@ -55,7 +55,7 @@ This uses the official Pixiv Android client API, which bypasses web rate limits 
 
 1. From the repository root, run:
    ```powershell
-   .\.venv\Scripts\python.exe backend\scripts\auth_pixiv.py
+   python backend\scripts\auth_pixiv.py
    ```
 2. The script will print a unique login URL. **Copy and open this URL in your web browser.**
 3. Log in to your Pixiv account.

@@ -1,5 +1,4 @@
 ﻿import argparse
-import importlib.util
 import platform
 import subprocess
 import sys
@@ -17,24 +16,28 @@ def default_triple() -> str:
     return f"{arch}-unknown-linux-gnu"
 
 
-def pyinstaller_python(root: Path) -> str:
-    candidates = [
-        root / ".venv" / "Scripts" / "python.exe",
-        root / ".venv" / "bin" / "python",
-    ]
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        probe = subprocess.run(
-            [str(candidate), "-c", "import PyInstaller, fastapi"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if probe.returncode == 0:
-            return str(candidate)
-    if importlib.util.find_spec("PyInstaller") is not None:
+def pyinstaller_python() -> str:
+    probe = subprocess.run(
+        [sys.executable, "-c", "import PyInstaller, fastapi"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode == 0:
         return sys.executable
-    raise RuntimeError("PyInstaller is unavailable; install the project with the 'tauri' extra")
+
+    platform_extra = "windows" if platform.system().lower() == "windows" else "unix"
+    python_command = (
+        f'& "{sys.executable}"' if platform_extra == "windows" else f'"{sys.executable}"'
+    )
+    install_command = f'{python_command} -m pip install -e ".[{platform_extra},tauri]"'
+    detail = probe.stderr.strip().splitlines()
+    cause = f" ({detail[-1]})" if detail else ""
+    raise RuntimeError(
+        f"The active Python interpreter cannot import the sidecar build dependencies{cause}.\n"
+        f"Interpreter: {sys.executable}\n"
+        f"Install them with: {install_command}"
+    )
 
 
 def main() -> int:
@@ -57,7 +60,7 @@ def main() -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        builder_python = pyinstaller_python(root)
+        builder_python = pyinstaller_python()
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -80,7 +83,7 @@ def main() -> int:
         cmd.append("--clean")
     cmd.append(str(entry))
 
-    result = subprocess.run(cmd, cwd=str(root))
+    result = subprocess.run(cmd, cwd=str(root), check=False)
     if result.returncode != 0:
         return result.returncode
 

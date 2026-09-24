@@ -34,7 +34,7 @@ LMZ also contains a browser-capture prototype. It is not part of the v1.0.0 rele
 
 ## Requirements
 
-- Python 3.11 or newer
+- Python 3.13 or newer
 - Node.js 20.19+ or 22.12+ and npm
 - Rust and Cargo; Tauri currently requires Rust 1.77.2 or newer
 - FFmpeg and FFprobe on `PATH`
@@ -49,10 +49,8 @@ The project installs `gallery-dl`, `yt-dlp`, and the required Python packages. W
 From PowerShell in the repository root:
 
 ```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[windows,tauri]"
-.\.venv\Scripts\python.exe -m pip install pytest
+python -m pip install --upgrade pip
+python -m pip install -e ".[windows,tauri,dev]"
 
 cd frontend
 npm install
@@ -60,14 +58,14 @@ npm exec playwright install chromium
 cd ..
 ```
 
-The commands above use Windows PowerShell. For Linux or macOS, use the equivalent virtual-environment commands, replace the Python extras with `.[unix,tauri]`, and install the platform-specific Tauri packages.
+The commands above use the selected global Python 3.13+ interpreter. On Linux or macOS, replace the Python extras with `.[unix,tauri,dev]` and install the platform-specific Tauri packages.
 
 ## Quick Start
 
 Run the Python/media readiness report before launching:
 
 ```powershell
-.\.venv\Scripts\python.exe tools\maintenance\lmz_readiness_check.py --non-interactive
+python tools\maintenance\lmz_readiness_check.py --non-interactive
 ```
 
 This report does not replace checking Node.js/npm, Rust/Cargo, Windows WebView2, or the Microsoft C++ build tools required for the desktop build.
@@ -75,7 +73,7 @@ This report does not replace checking Node.js/npm, Rust/Cargo, Windows WebView2,
 Start the development application:
 
 ```powershell
-.\.venv\Scripts\python.exe dev.py
+python dev.py
 ```
 
 This starts the local FastAPI backend on `127.0.0.1:8000`, starts Vite, and opens the Tauri desktop window. Stop the development session with `Ctrl+C` or by closing the application.
@@ -162,7 +160,7 @@ Run the backend directly from the repository root:
 
 ```powershell
 cd backend
-..\.venv\Scripts\python.exe web_api.py
+python web_api.py
 ```
 
 Run frontend checks and builds from the repository root:
@@ -177,14 +175,10 @@ cd ..
 Run backend tests from the repository root:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\backend
+python -m pytest tests\backend
 ```
 
-Before running frontend Playwright tests or the sidecar build, activate the project virtual environment because those npm scripts call `python` internally:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
+Before running frontend Playwright tests or the sidecar build, make sure the global Python 3.13+ interpreter is the active `python` on `PATH`; those npm scripts call `python` internally.
 
 Run frontend checks and tests from the repository root:
 
@@ -206,11 +200,11 @@ npm run tauri build
 From the repository root, the direct pipeline entry point and installed CLI command remain available:
 
 ```powershell
-.\.venv\Scripts\python.exe main.py
-.\.venv\Scripts\lmz.exe
+python main.py
+lmz
 ```
 
-The second command is also available as `lmz` after activating the virtual environment. For normal interactive use, prefer `.\.venv\Scripts\python.exe dev.py` and the desktop interface.
+The second command is available after the editable global installation. For normal interactive use, prefer `python dev.py` and the desktop interface.
 
 ## Repository Map
 

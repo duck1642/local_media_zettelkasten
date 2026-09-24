@@ -16,10 +16,8 @@ Contributions are welcome for bug fixes, documentation, tests, and focused impro
 From the repository root in PowerShell:
 
 ```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[windows,tauri]"
-.\.venv\Scripts\python.exe -m pip install pytest
+python -m pip install --upgrade pip
+python -m pip install -e ".[windows,tauri,dev]"
 
 cd frontend
 npm install
@@ -27,27 +25,25 @@ npm exec playwright install chromium
 cd ..
 ```
 
-The commands above use Windows PowerShell. On Linux or macOS, use the equivalent virtual-environment commands, replace the Python extras with `.[unix,tauri]`, and install the platform-specific Tauri dependencies.
+The commands above use the selected global Python 3.13+ interpreter. On Linux or macOS, replace the Python extras with `.[unix,tauri,dev]` and install the platform-specific Tauri dependencies.
 
 ## Local Checks
 
 Run the readiness report:
 
 ```powershell
-.\.venv\Scripts\python.exe tools\maintenance\lmz_readiness_check.py --non-interactive
+python tools\maintenance\lmz_readiness_check.py --non-interactive
 ```
 
 Run backend tests:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\backend
+python -m pytest tests\backend
 ```
 
 Run frontend checks and tests:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-
 cd frontend
 npm run check
 npm run build
@@ -56,7 +52,7 @@ npm run test:playwright
 cd ..
 ```
 
-Activate the project environment before frontend Playwright tests or the sidecar build because those npm scripts call `python` internally.
+Before running frontend Playwright tests or the sidecar build, make sure the global Python 3.13+ interpreter is the active `python` on `PATH`; those npm scripts call `python` internally.
 
 ## Issues and Pull Requests
 
