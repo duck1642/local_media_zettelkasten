@@ -249,3 +249,4 @@ tools/browser_extension/**/.env
 last_screen.png
 .graphify_detect.json
 
+WALKTHROUGH.md
