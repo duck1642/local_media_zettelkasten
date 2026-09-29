@@ -38,7 +38,6 @@ def fresh_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *module_names
             "utils",
             "runtime_context",
             "runtime_activation",
-            "web_api",
             "queue_service",
             "md_generator",
             "metadata_index",

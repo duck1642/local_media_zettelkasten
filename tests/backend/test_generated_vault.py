@@ -25,7 +25,7 @@ def load_generator():
 
 def reset_backend_modules():
     for name in list(sys.modules):
-        if name in {"api", "utils", "runtime_context", "web_api", "metadata_index", "md_generator", "thumbnails", "topics", "workspace_db", "vaults", "workspaces", "artists", "platforms"} or name.startswith(("api.", "db.", "logger", "tagging")):
+        if name in {"api", "utils", "runtime_context", "metadata_index", "md_generator", "thumbnails", "topics", "workspace_db", "vaults", "workspaces", "artists", "platforms"} or name.startswith(("api.", "db.", "logger", "tagging")):
             del sys.modules[name]
 
 
@@ -205,10 +205,10 @@ def test_generated_vault_rows_notes_and_media_are_consistent(tmp_path, monkeypat
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
     reset_backend_modules()
-    web_api = importlib.import_module("web_api")
+    library = importlib.import_module("api.library")
 
-    filtered = web_api._get_items_sync(None, None, "newest", "all", [], [], [], [], [sample_wd_tag], [], None, 25)
-    facets = web_api._get_facets_sync("wd_tag", sample_wd_tag, 25)
+    filtered = library._get_items_sync(None, None, "newest", "all", [], [], [], [], [sample_wd_tag], [], None, 25)
+    facets = library._get_facets_sync("wd_tag", sample_wd_tag, 25)
 
     assert filtered["items"]
     assert all(item["hash"] for item in filtered["items"])

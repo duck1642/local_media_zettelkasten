@@ -41,7 +41,6 @@ def fresh_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             "utils",
             "runtime_context",
             "runtime_activation",
-            "web_api",
             "workspaces",
             "queue_service",
             "md_generator",

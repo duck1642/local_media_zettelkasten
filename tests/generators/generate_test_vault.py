@@ -236,7 +236,7 @@ def _config() -> dict:
 
 def _reset_backend_modules():
     for name in list(sys.modules):
-        if name in {"api", "utils", "runtime_context", "metadata_index", "md_generator", "thumbnails", "artists", "platforms", "topics", "workspace_db", "web_api", "vaults", "workspaces"} or name.startswith(("api.", "db.", "logger", "tagging")):
+        if name in {"api", "utils", "runtime_context", "metadata_index", "md_generator", "thumbnails", "artists", "platforms", "topics", "workspace_db", "vaults", "workspaces"} or name.startswith(("api.", "db.", "logger", "tagging")):
             del sys.modules[name]
 
 

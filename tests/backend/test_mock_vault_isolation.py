@@ -51,7 +51,7 @@ def fresh_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *module_names
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
     for name in list(sys.modules):
-        if name in {"api", "utils", "runtime_context", "runtime_activation", "web_api", "queue_service", "md_generator", "media_lifecycle", "metadata_index", "metadata_maintenance", "processor", "external_ingestion", "thumbnails", "fingerprint", "artists", "platforms", "review_cache", "topics", "vaults", "vault_packages", "workspace_db", "ingest_control", "workspaces"} or name.startswith(("api.", "logger", "db.", "tagging", "downloaders")):
+        if name in {"api", "utils", "runtime_context", "runtime_activation", "queue_service", "md_generator", "media_lifecycle", "metadata_index", "metadata_maintenance", "processor", "external_ingestion", "thumbnails", "fingerprint", "artists", "platforms", "review_cache", "topics", "vaults", "vault_packages", "workspace_db", "ingest_control", "workspaces"} or name.startswith(("api.", "logger", "db.", "tagging", "downloaders")):
             del sys.modules[name]
     from app_paths import get_app_paths
     from config_repository import SettingsRepository, bootstrap_data_home
@@ -79,7 +79,15 @@ def fresh_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *module_names
         "active_workspace": "default",
         "workspaces": {"default": {"name": "Default", "config_path": str(work / "config.yaml")}},
     })
-    return [importlib.import_module(name) for name in module_names]
+    modules = []
+    for name in module_names:
+        if name == "api":
+            # The package exposes its real route modules after loading the app composition root.
+            importlib.import_module("api.app")
+            modules.append(importlib.import_module("api"))
+        else:
+            modules.append(importlib.import_module(name))
+    return modules
 
 
 def insert_mock_item(sqlite_operator, item_hash: str, artist: str = "DB Artist", date_added: str = "2026-01-02 03:04:05"):
@@ -441,8 +449,8 @@ def test_logger_reconfigure_writes_to_context_logs(monkeypatch, tmp_path):
         lmz_logger.reconfigure_logging(default_ctx)
 
 
-def test_web_api_dynamic_media_routes_use_active_context_and_block_traversal(monkeypatch, tmp_path):
-    utils, web_api = fresh_backend(monkeypatch, tmp_path, "utils", "web_api")
+def test_api_dynamic_media_routes_use_active_context_and_block_traversal(monkeypatch, tmp_path):
+    utils, api = fresh_backend(monkeypatch, tmp_path, "utils", "api")
     asset = utils.ASSETS_DIR / "aa" / "item.jpg"
     review = utils.REVIEW_DIR / "review.jpg"
     asset.parent.mkdir(parents=True, exist_ok=True)
@@ -450,10 +458,10 @@ def test_web_api_dynamic_media_routes_use_active_context_and_block_traversal(mon
     asset.write_bytes(b"asset")
     review.write_bytes(b"review")
 
-    assert Path(web_api._file_response_under(utils.ASSETS_DIR, "aa/item.jpg").path) == asset
-    assert Path(web_api._file_response_under(utils.REVIEW_DIR, "review.jpg").path) == review
+    assert Path(api.common._file_response_under(utils.ASSETS_DIR, "aa/item.jpg").path) == asset
+    assert Path(api.common._file_response_under(utils.REVIEW_DIR, "review.jpg").path) == review
     with pytest.raises(HTTPException):
-        web_api._file_response_under(utils.ASSETS_DIR, "../config.yaml")
+        api.common._file_response_under(utils.ASSETS_DIR, "../config.yaml")
 
 
 def test_metadata_watchdog_uses_injected_notes_and_wd_dirs(monkeypatch, tmp_path):
@@ -545,27 +553,27 @@ def test_search_manager_context_isolates_ram_indexes(monkeypatch, tmp_path):
 
 
 def test_local_ingest_state_and_stop_events_are_context_isolated(monkeypatch, tmp_path):
-    runtime_context, web_api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "web_api")
+    runtime_context, api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "api")
     default_ctx = runtime_context.get_runtime_context()
     injected_ctx = injected_context_for(runtime_context, tmp_path)
 
-    web_api.reset_local_ingest_state(default_ctx)
-    web_api.reset_local_ingest_state(injected_ctx)
-    with web_api.local_ingest_lock(default_ctx):
-        web_api.local_ingest_state(default_ctx)["running"] = True
-        web_api.local_ingest_state(default_ctx)["failed_paths"] = ["default.jpg"]
-    with web_api.local_ingest_lock(injected_ctx):
-        web_api.local_ingest_state(injected_ctx)["running"] = False
-        web_api.local_ingest_state(injected_ctx)["failed_paths"] = ["injected.jpg"]
+    api.common.reset_local_ingest_state(default_ctx)
+    api.common.reset_local_ingest_state(injected_ctx)
+    with api.common.local_ingest_lock(default_ctx):
+        api.common.local_ingest_state(default_ctx)["running"] = True
+        api.common.local_ingest_state(default_ctx)["failed_paths"] = ["default.jpg"]
+    with api.common.local_ingest_lock(injected_ctx):
+        api.common.local_ingest_state(injected_ctx)["running"] = False
+        api.common.local_ingest_state(injected_ctx)["failed_paths"] = ["injected.jpg"]
 
-    web_api.local_ingest_stop_event(default_ctx).set()
+    api.common.local_ingest_stop_event(default_ctx).set()
 
-    assert web_api._snapshot_local_ingest_state(default_ctx)["running"] is True
-    assert web_api._snapshot_local_ingest_state(injected_ctx)["running"] is False
-    assert web_api._snapshot_local_ingest_state(default_ctx)["failed_paths"] == ["default.jpg"]
-    assert web_api._snapshot_local_ingest_state(injected_ctx)["failed_paths"] == ["injected.jpg"]
-    assert web_api.local_ingest_stop_event(default_ctx).is_set()
-    assert not web_api.local_ingest_stop_event(injected_ctx).is_set()
+    assert api.ingestion._snapshot_local_ingest_state(default_ctx)["running"] is True
+    assert api.ingestion._snapshot_local_ingest_state(injected_ctx)["running"] is False
+    assert api.ingestion._snapshot_local_ingest_state(default_ctx)["failed_paths"] == ["default.jpg"]
+    assert api.ingestion._snapshot_local_ingest_state(injected_ctx)["failed_paths"] == ["injected.jpg"]
+    assert api.common.local_ingest_stop_event(default_ctx).is_set()
+    assert not api.common.local_ingest_stop_event(injected_ctx).is_set()
 
 
 def test_online_stop_event_helper_is_context_isolated(monkeypatch, tmp_path):
@@ -683,36 +691,36 @@ def test_metadata_watchdog_restart_clears_old_state_and_uses_new_context(monkeyp
 
 
 def test_runtime_switch_preflight_reports_runtime_blockers(monkeypatch, tmp_path):
-    runtime_context, metadata_index, web_api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "metadata_index", "web_api")
+    runtime_context, metadata_index, api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "metadata_index", "api")
     ctx = runtime_context.get_runtime_context()
-    web_api.reset_local_ingest_state(ctx)
+    api.common.reset_local_ingest_state(ctx)
 
-    assert web_api.runtime_switch_preflight(ctx) == {"allowed": True, "blockers": []}
+    assert api.ingestion.runtime_switch_preflight(ctx) == {"allowed": True, "blockers": []}
 
-    with web_api.local_ingest_lock(ctx):
-        web_api.local_ingest_state(ctx)["running"] = True
-    result = web_api.runtime_switch_preflight(ctx)
+    with api.common.local_ingest_lock(ctx):
+        api.common.local_ingest_state(ctx)["running"] = True
+    result = api.ingestion.runtime_switch_preflight(ctx)
     assert result["allowed"] is False
     assert "local_ingest_running" in result["blockers"]
 
-    with web_api.local_ingest_lock(ctx):
-        web_api.local_ingest_state(ctx)["running"] = False
+    with api.common.local_ingest_lock(ctx):
+        api.common.local_ingest_state(ctx)["running"] = False
     state = metadata_index._runtime_state(ctx)
     with state.repair_lock:
         state.repair_running = True
-    result = web_api.runtime_switch_preflight(ctx)
+    result = api.ingestion.runtime_switch_preflight(ctx)
     assert result["allowed"] is False
     assert "metadata_repair_running" in result["blockers"]
     with state.repair_lock:
         state.repair_running = False
 
-    assert web_api.INGESTION_LOCK.acquire(blocking=False)
+    assert api.ingestion.INGESTION_LOCK.acquire(blocking=False)
     try:
-        result = web_api.runtime_switch_preflight(ctx)
+        result = api.ingestion.runtime_switch_preflight(ctx)
         assert result["allowed"] is False
         assert "online_ingest_running" in result["blockers"]
     finally:
-        web_api.INGESTION_LOCK.release()
+        api.ingestion.INGESTION_LOCK.release()
 
 
 def test_workspace_registry_resolves_active_and_env_override(monkeypatch, tmp_path):
@@ -789,14 +797,14 @@ def test_workspace_setup_creates_lmz_layout_and_resolves_paths(monkeypatch, tmp_
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
     for name in list(sys.modules):
-        if name in {"utils", "runtime_context", "db.sqlite_operator", "web_api", "topics", "vaults", "metadata_index", "md_generator", "artists", "platforms", "workspace_db", "review_cache"} or name.startswith(("logger", "db.", "tagging")):
+        if name in {"utils", "runtime_context", "db.sqlite_operator", "api", "topics", "vaults", "metadata_index", "md_generator", "artists", "platforms", "workspace_db", "review_cache"} or name.startswith(("api.", "logger", "db.", "tagging")):
             del sys.modules[name]
     utils = importlib.import_module("utils")
     from app_paths import get_app_paths
     from config_repository import bootstrap_data_home
     bootstrap_data_home(get_app_paths())
     sqlite_operator = importlib.import_module("db.sqlite_operator")
-    web_api = importlib.import_module("web_api")
+    library = importlib.import_module("api.library")
 
     assert utils.CONFIG_ROOT == workspace_parent / "lmz"
     assert utils.MODELS_DIR == tmp_path / ".lmz" / "app" / "models"
@@ -818,7 +826,7 @@ def test_workspace_setup_creates_lmz_layout_and_resolves_paths(monkeypatch, tmp_
     conn.commit()
     conn.close()
 
-    detail = web_api._update_item_sync(item_hash, web_api.ItemUpdate(topics=["obsidian topic"]))
+    detail = library._update_item_sync(item_hash, library.ItemUpdate(topics=["obsidian topic"]))
     assert detail["topics"] == ["obsidian_topic"]
     assert (workspace_parent / "lmz" / "data" / "topics" / "obsidian_topic.md").exists()
     assert utils.note_path_for(item_hash, storage_id).exists()
@@ -903,7 +911,7 @@ def test_workspace_setup_refuses_runtime_paths(tmp_path):
 
 
 def test_workspace_api_lists_registers_and_sets_active(monkeypatch, tmp_path):
-    web_api, workspaces = fresh_backend(monkeypatch, tmp_path, "web_api", "workspaces")
+    api, workspaces = fresh_backend(monkeypatch, tmp_path, "api", "workspaces")
     registry_path = tmp_path / "workspaces.yaml"
     monkeypatch.setattr(workspaces, "REGISTRY_PATH", registry_path)
     workspaces.save_workspace_registry({
@@ -915,15 +923,15 @@ def test_workspace_api_lists_registers_and_sets_active(monkeypatch, tmp_path):
     })
     workspace_parent = (Path(tempfile.gettempdir()) / f"lmz-api-test-{time.time_ns()}").resolve()
     try:
-        initial = web_api._get_workspaces_sync()
+        initial = api.runtime._get_workspaces_sync()
         assert initial["active"] == "default"
         assert initial["items"][0]["id"] == "default"
 
-        added = web_api._create_workspace_sync({"path": str(workspace_parent), "name": "API Workspace"})
+        added = api.runtime._create_workspace_sync({"path": str(workspace_parent), "name": "API Workspace"})
         assert any(item["name"] == "API Workspace" for item in added["items"])
 
         workspace_id = next(item["id"] for item in added["items"] if item["name"] == "API Workspace")
-        active = web_api._set_workspace_active_sync({"id": workspace_id})
+        active = api.runtime._set_workspace_active_sync({"id": workspace_id})
         assert active["restart_required"] is False
         assert active["active"] == workspace_id
     finally:
@@ -931,36 +939,36 @@ def test_workspace_api_lists_registers_and_sets_active(monkeypatch, tmp_path):
 
 
 def test_vault_api_creates_sets_active_and_rejects_active_delete(monkeypatch, tmp_path):
-    web_api, vaults = fresh_backend(monkeypatch, tmp_path, "web_api", "vaults")
+    api, vaults = fresh_backend(monkeypatch, tmp_path, "api", "vaults")
 
-    created = web_api._create_vault_sync({"name": "Second Vault"})
+    created = api.runtime._create_vault_sync({"name": "Second Vault"})
     second = next(item for item in created["items"] if item["id"] == "second-vault")
 
     assert Path(second["root"]).exists()
     assert Path(second["db_path"]).exists()
 
-    active = web_api._set_vault_active_sync({"id": "second-vault"})
+    active = api.runtime._set_vault_active_sync({"id": "second-vault"})
     assert active["restart_required"] is False
     assert active["active"] == "second-vault"
 
     with pytest.raises(HTTPException) as exc:
-        web_api._delete_vault_sync("second-vault", confirm=True)
+        api.runtime._delete_vault_sync("second-vault", confirm=True)
     assert exc.value.status_code == 400
 
 
 def test_vault_rename_delete_confirm_and_missing_errors(monkeypatch, tmp_path):
-    web_api, vaults = fresh_backend(monkeypatch, tmp_path, "web_api", "vaults")
+    api, vaults = fresh_backend(monkeypatch, tmp_path, "api", "vaults")
 
-    web_api._create_vault_sync({"name": "Temporary Vault"})
-    renamed = web_api._rename_vault_sync("temporary-vault", {"name": "Renamed Vault"})
+    api.runtime._create_vault_sync({"name": "Temporary Vault"})
+    renamed = api.runtime._rename_vault_sync("temporary-vault", {"name": "Renamed Vault"})
     assert any(item["id"] == "temporary-vault" and item["name"] == "Renamed Vault" for item in renamed["items"])
 
     with pytest.raises(HTTPException) as missing:
-        web_api._rename_vault_sync("missing-vault", {"name": "Missing"})
+        api.runtime._rename_vault_sync("missing-vault", {"name": "Missing"})
     assert missing.value.status_code == 404
 
     with pytest.raises(HTTPException) as needs_confirm:
-        web_api._delete_vault_sync("temporary-vault", confirm=False)
+        api.runtime._delete_vault_sync("temporary-vault", confirm=False)
     assert needs_confirm.value.status_code == 400
 
     metadata_index = importlib.import_module("metadata_index")
@@ -970,11 +978,11 @@ def test_vault_rename_delete_confirm_and_missing_errors(monkeypatch, tmp_path):
         time.sleep(0.01)
     assert state.repair_running is False
 
-    deleted = web_api._delete_vault_sync("temporary-vault", confirm=True)
+    deleted = api.runtime._delete_vault_sync("temporary-vault", confirm=True)
     assert all(item["id"] != "temporary-vault" for item in deleted["items"])
 
     with pytest.raises(HTTPException) as missing_delete:
-        web_api._delete_vault_sync("temporary-vault", confirm=True)
+        api.runtime._delete_vault_sync("temporary-vault", confirm=True)
     assert missing_delete.value.status_code == 404
 
 
@@ -1364,7 +1372,7 @@ def test_vault_import_rolls_back_on_final_move_failure(monkeypatch, tmp_path):
 
 
 def test_active_workspace_and_vault_switches_are_preflight_guarded(monkeypatch, tmp_path):
-    web_api, vaults, workspaces = fresh_backend(monkeypatch, tmp_path, "web_api", "vaults", "workspaces")
+    api, vaults, workspaces = fresh_backend(monkeypatch, tmp_path, "api", "vaults", "workspaces")
     registry_path = tmp_path / "workspaces.yaml"
     monkeypatch.setattr(workspaces, "REGISTRY_PATH", registry_path)
     workspaces.save_workspace_registry({
@@ -1376,16 +1384,16 @@ def test_active_workspace_and_vault_switches_are_preflight_guarded(monkeypatch, 
     })
     workspace_parent = (Path(tempfile.gettempdir()) / f"lmz-switch-guard-test-{time.time_ns()}").resolve()
     try:
-        created = web_api._create_vault_sync({"name": "Guard Target"})
+        created = api.runtime._create_vault_sync({"name": "Guard Target"})
         assert any(item["id"] == "guard-target" for item in created["items"])
-        added = web_api._create_workspace_sync({"path": str(workspace_parent), "name": "Guard Workspace"})
+        added = api.runtime._create_workspace_sync({"path": str(workspace_parent), "name": "Guard Workspace"})
         workspace_id = next(item["id"] for item in added["items"] if item["name"] == "Guard Workspace")
 
-        ctx = web_api.get_runtime_context()
-        with web_api.local_ingest_lock(ctx):
-            web_api.local_ingest_state(ctx)["running"] = True
+        ctx = api.common.get_runtime_context()
+        with api.common.local_ingest_lock(ctx):
+            api.common.local_ingest_state(ctx)["running"] = True
         try:
-            blocker = web_api._runtime_switch_blocker()
+            blocker = api.runtime._runtime_switch_blocker()
             assert blocker is not None
             assert blocker.status_code == 409
             payload = json.loads(blocker.body.decode("utf-8"))
@@ -1393,33 +1401,33 @@ def test_active_workspace_and_vault_switches_are_preflight_guarded(monkeypatch, 
             assert "local_ingest_running" in payload["blockers"]
 
             with pytest.raises(HTTPException) as vault_exc:
-                web_api._set_vault_active_sync({"id": "guard-target"})
+                api.runtime._set_vault_active_sync({"id": "guard-target"})
             assert vault_exc.value.status_code == 409
             assert "local_ingest_running" in vault_exc.value.detail["blockers"]
 
             with pytest.raises(HTTPException) as workspace_exc:
-                web_api._set_workspace_active_sync({"id": workspace_id})
+                api.runtime._set_workspace_active_sync({"id": workspace_id})
             assert workspace_exc.value.status_code == 409
             assert "local_ingest_running" in workspace_exc.value.detail["blockers"]
         finally:
-            with web_api.local_ingest_lock(ctx):
-                web_api.local_ingest_state(ctx)["running"] = False
+            with api.common.local_ingest_lock(ctx):
+                api.common.local_ingest_state(ctx)["running"] = False
 
-        assert web_api.INGESTION_LOCK.acquire(blocking=False)
+        assert api.ingestion.INGESTION_LOCK.acquire(blocking=False)
         try:
-            blocker = web_api._runtime_switch_blocker()
+            blocker = api.runtime._runtime_switch_blocker()
             payload = json.loads(blocker.body.decode("utf-8"))
             assert blocker.status_code == 409
             assert "online_ingest_running" in payload["blockers"]
         finally:
-            web_api.INGESTION_LOCK.release()
+            api.ingestion.INGESTION_LOCK.release()
 
         metadata_index = importlib.import_module("metadata_index")
         state = metadata_index._runtime_state(ctx)
         with state.repair_lock:
             state.repair_running = True
         try:
-            blocker = web_api._runtime_switch_blocker()
+            blocker = api.runtime._runtime_switch_blocker()
             payload = json.loads(blocker.body.decode("utf-8"))
             assert blocker.status_code == 409
             assert "metadata_repair_running" in payload["blockers"]
@@ -1625,20 +1633,20 @@ https://site.test/c
 
 
 def test_review_cleanup_state_and_orphan_sidecar(monkeypatch, tmp_path):
-    web_api, utils = fresh_backend(monkeypatch, tmp_path, "web_api", "utils")
+    api, utils = fresh_backend(monkeypatch, tmp_path, "api", "utils")
 
-    assert web_api._normalize_review_state("cleanup_failed") == "pending_cleanup"
+    assert api.common._normalize_review_state("cleanup_failed") == "pending_cleanup"
     orphan = utils.REVIEW_DIR / "orphan.jpg.json"
     orphan.write_text('{"state":"resolved_delete"}', encoding="utf-8")
 
-    result = web_api._cleanup_review_resolved_sync()
+    result = api.review._cleanup_review_resolved_sync()
 
     assert result["cleaned_orphans"] == 1
     assert not orphan.exists()
 
 
-def test_web_api_startup_hydrates_search_manager(monkeypatch, tmp_path):
-    runtime_context, web_api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "web_api")
+def test_api_startup_hydrates_search_manager(monkeypatch, tmp_path):
+    runtime_context, api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "api")
     runtime_context.reload_runtime_context()
     calls = []
 
@@ -1651,16 +1659,16 @@ def test_web_api_startup_hydrates_search_manager(monkeypatch, tmp_path):
             calls.append(("hydrate", conn))
 
     fake_conn = FakeConnection()
-    monkeypatch.setattr(web_api, "init_database", lambda: fake_conn)
-    monkeypatch.setattr(web_api, "search_manager", FakeSearchManager())
+    monkeypatch.setattr(api.app, "init_database", lambda: fake_conn)
+    monkeypatch.setattr(api.app, "search_manager", FakeSearchManager())
 
-    asyncio.run(web_api.startup_search_index())
+    asyncio.run(api.app.startup_search_index())
 
     assert calls == [("hydrate", fake_conn), "close"]
 
 
 def test_review_listing_does_not_auto_resolve_pending_db_hash(monkeypatch, tmp_path):
-    web_api, utils, sqlite_operator = fresh_backend(monkeypatch, tmp_path, "web_api", "utils", "db.sqlite_operator")
+    api, utils, sqlite_operator = fresh_backend(monkeypatch, tmp_path, "api", "utils", "db.sqlite_operator")
     item_hash = "1" * 64
     conn = insert_mock_item(sqlite_operator, item_hash)
     conn.close()
@@ -1671,7 +1679,7 @@ def test_review_listing_does_not_auto_resolve_pending_db_hash(monkeypatch, tmp_p
     sidecar = review_file.with_suffix(".jpg.json")
     sidecar.write_text(json.dumps({"state": "pending", "file_hash": item_hash, "original_name": "pending_same_hash.jpg"}), encoding="utf-8")
 
-    items = web_api._get_review_items_sync()
+    items = api.review._get_review_items_sync()
     saved = json.loads(sidecar.read_text(encoding="utf-8"))
     target = next(item for item in items if item["filename"] == review_file.name)
 
@@ -1681,13 +1689,13 @@ def test_review_listing_does_not_auto_resolve_pending_db_hash(monkeypatch, tmp_p
 
 
 def test_review_count_uses_cache_without_full_resolver(monkeypatch, tmp_path):
-    web_api, = fresh_backend(monkeypatch, tmp_path, "web_api")
+    api, = fresh_backend(monkeypatch, tmp_path, "api")
 
     def fail_resolver():
         raise AssertionError("review count should not resolve all review entries")
 
-    monkeypatch.setattr(web_api, "_resolve_review_entries", fail_resolver)
-    count = web_api._get_review_count_sync(include_resolved=True)
+    monkeypatch.setattr(api.review, "_resolve_review_entries", fail_resolver)
+    count = api.review._get_review_count_sync(include_resolved=True)
 
     assert count["pending"] >= 1
     assert count["cleanup"] >= 1
@@ -1695,17 +1703,17 @@ def test_review_count_uses_cache_without_full_resolver(monkeypatch, tmp_path):
 
 
 def test_review_count_cache_ignores_resolved_variant(monkeypatch, tmp_path):
-    web_api, utils = fresh_backend(monkeypatch, tmp_path, "web_api", "utils")
+    api, utils = fresh_backend(monkeypatch, tmp_path, "api", "utils")
     resolved_file = utils.REVIEW_DIR / "resolved-variant.webp"
     resolved_file.write_bytes(b"resolved")
     resolved_file.with_suffix(".webp.json").write_text(
         json.dumps({"state": "resolved_variant", "file_hash": "12" * 32}),
         encoding="utf-8",
     )
-    web_api.mark_review_cache_dirty()
+    api.common.mark_review_cache_dirty()
 
-    count = web_api._get_review_count_sync(include_resolved=True)
-    items = web_api._get_review_items_sync(False)
+    count = api.review._get_review_count_sync(include_resolved=True)
+    items = api.review._get_review_items_sync(False)
 
     assert len([item for item in items if item["filename"] == resolved_file.name]) == 1
     assert count["pending"] == 1
@@ -1713,7 +1721,7 @@ def test_review_count_cache_ignores_resolved_variant(monkeypatch, tmp_path):
 
 
 def test_delete_item_removes_ram_indexes(monkeypatch, tmp_path):
-    sqlite_operator, web_api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "web_api")
+    sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "api")
     item_hash = "9a" * 32
     conn = insert_mock_item(sqlite_operator, item_hash)
     conn.execute(
@@ -1728,49 +1736,49 @@ def test_delete_item_removes_ram_indexes(monkeypatch, tmp_path):
         def remove_indexes_batch(self, items):
             removed.extend(items)
 
-    monkeypatch.setattr(web_api, "search_manager", FakeSearchManager())
+    monkeypatch.setattr(api.library, "search_manager", FakeSearchManager())
 
-    result = web_api._delete_item_sync(item_hash)
+    result = api.library._delete_item_sync(item_hash)
 
     assert result["status"] == "success"
     assert removed == [{"hash": item_hash, "source_url": "https://example.test/delete"}]
 
 
 def test_local_ingest_state_guards_and_result_cap(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
 
-    web_api._prepare_local_ingest_run("run-1", {"artist": "A"}, True)
+    api.ingestion._prepare_local_ingest_run("run-1", {"artist": "A"}, True)
     with pytest.raises(HTTPException) as exc:
-        web_api._prepare_local_ingest_run("run-2", {}, False)
+        api.ingestion._prepare_local_ingest_run("run-2", {}, False)
     assert exc.value.status_code == 409
 
-    with web_api.LOCAL_INGEST_LOCK:
-        web_api.LOCAL_INGEST_STATE["running"] = False
-        web_api.LOCAL_INGEST_STATE["results"] = []
+    with api.common.LOCAL_INGEST_LOCK:
+        api.common.LOCAL_INGEST_STATE["running"] = False
+        api.common.LOCAL_INGEST_STATE["results"] = []
         for index in range(505):
-            web_api._append_local_ingest_result({"index": index})
+            api.ingestion._append_local_ingest_result({"index": index})
 
-    assert len(web_api.LOCAL_INGEST_STATE["results"]) == 500
-    assert web_api.LOCAL_INGEST_STATE["results"][0]["index"] == 5
-    assert web_api.LOCAL_INGEST_STATE["last_defaults"] == {"artist": "A"}
-    assert web_api.LOCAL_INGEST_STATE["last_skip_similarity"] is True
+    assert len(api.common.LOCAL_INGEST_STATE["results"]) == 500
+    assert api.common.LOCAL_INGEST_STATE["results"][0]["index"] == 5
+    assert api.common.LOCAL_INGEST_STATE["last_defaults"] == {"artist": "A"}
+    assert api.common.LOCAL_INGEST_STATE["last_skip_similarity"] is True
 
 
 def test_local_retry_preserves_defaults_and_skip_similarity(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
     calls = []
 
     def fake_worker(paths, defaults, skip_similarity, run_id):
         calls.append((paths, defaults, skip_similarity, run_id))
 
-    monkeypatch.setattr(web_api, "_run_local_ingest_worker", fake_worker)
-    with web_api.LOCAL_INGEST_LOCK:
-        web_api.LOCAL_INGEST_STATE["running"] = False
-        web_api.LOCAL_INGEST_STATE["failed_paths"] = ["failed-a.jpg"]
-        web_api.LOCAL_INGEST_STATE["last_defaults"] = {"artist": "Retry Artist"}
-        web_api.LOCAL_INGEST_STATE["last_skip_similarity"] = True
+    monkeypatch.setattr(api.ingestion, "_run_local_ingest_worker", fake_worker)
+    with api.common.LOCAL_INGEST_LOCK:
+        api.common.LOCAL_INGEST_STATE["running"] = False
+        api.common.LOCAL_INGEST_STATE["failed_paths"] = ["failed-a.jpg"]
+        api.common.LOCAL_INGEST_STATE["last_defaults"] = {"artist": "Retry Artist"}
+        api.common.LOCAL_INGEST_STATE["last_skip_similarity"] = True
 
-    result = asyncio.run(web_api.local_ingest_retry_failed())
+    result = asyncio.run(api.ingestion.local_ingest_retry_failed())
 
     assert result["status"] == "success"
     assert result["queued"] == 1
@@ -1780,7 +1788,7 @@ def test_local_retry_preserves_defaults_and_skip_similarity(monkeypatch, tmp_pat
 
 
 def test_local_worker_reports_wd_tagging_status_for_started_paths(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
     source = tmp_path / "drop_ok.jpg"
     source.write_bytes(b"fake image")
 
@@ -1794,43 +1802,43 @@ def test_local_worker_reports_wd_tagging_status_for_started_paths(monkeypatch, t
             "tagging_error": "",
         }
 
-    monkeypatch.setattr(web_api, "process_file", fake_process_file)
+    monkeypatch.setattr(api.ingestion, "process_file", fake_process_file)
     monkeypatch.setattr(
-        web_api,
+        api.ingestion,
         "get_app_settings",
         lambda: {"ingestion": {"accepted_media": {"extensions": ["jpg"]}}},
     )
 
-    web_api._prepare_local_ingest_run("run-tags", {}, False, 1)
-    web_api._run_local_ingest_worker([str(source)], {}, False, "run-tags")
+    api.ingestion._prepare_local_ingest_run("run-tags", {}, False, 1)
+    api.ingestion._run_local_ingest_worker([str(source)], {}, False, "run-tags")
 
-    result = web_api._snapshot_local_ingest_state()["results"][-1]
+    result = api.ingestion._snapshot_local_ingest_state()["results"][-1]
 
     assert result["status"] == "ingested"
     assert "WD tags: ok (12)" in result["message"]
 
 
 def test_local_ingest_expansion_is_streaming_not_sorted(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
-    source = inspect.getsource(web_api._iter_local_ingest_paths)
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
+    source = inspect.getsource(api.ingestion._iter_local_ingest_paths)
 
     assert "sorted(" not in source
     assert ".rglob(\"*\")" in source
 
 
 def test_local_drop_intake_accepts_supported_file_and_directory(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
     sample_file = tmp_path / "drop_ok.jpg"
     sample_file.write_bytes(b"ok")
     sample_dir = tmp_path / "drop_dir"
     sample_dir.mkdir(parents=True, exist_ok=True)
 
-    payload = web_api.LocalIngestDropIntakeRequest(
+    payload = api.ingestion.LocalIngestDropIntakeRequest(
         session_id="s1",
         source_tab="vault",
         paths=[str(sample_file), str(sample_dir)],
     )
-    result = web_api._local_drop_intake_sync(payload)
+    result = api.ingestion._local_drop_intake_sync(payload)
 
     assert result["session_id"] == "s1"
     assert result["summary"]["received"] == 2
@@ -1841,17 +1849,17 @@ def test_local_drop_intake_accepts_supported_file_and_directory(monkeypatch, tmp
 
 
 def test_local_drop_intake_skips_unsupported_extension_and_missing(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
     bad_file = tmp_path / "drop_bad.txt"
     bad_file.write_text("x", encoding="utf-8")
     missing = tmp_path / "nope.jpg"
 
-    payload = web_api.LocalIngestDropIntakeRequest(
+    payload = api.ingestion.LocalIngestDropIntakeRequest(
         session_id="s2",
         source_tab="vault",
         paths=[str(bad_file), str(missing)],
     )
-    result = web_api._local_drop_intake_sync(payload)
+    result = api.ingestion._local_drop_intake_sync(payload)
     reasons = {entry["reason"] for entry in result["skipped"]}
 
     assert result["summary"]["accepted"] == 0
@@ -1861,16 +1869,16 @@ def test_local_drop_intake_skips_unsupported_extension_and_missing(monkeypatch, 
 
 
 def test_local_drop_intake_dedupes_paths(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
     sample_file = tmp_path / "dup_ok.jpg"
     sample_file.write_bytes(b"dup")
 
-    payload = web_api.LocalIngestDropIntakeRequest(
+    payload = api.ingestion.LocalIngestDropIntakeRequest(
         session_id="s3",
         source_tab="vault",
         paths=[str(sample_file), str(sample_file)],
     )
-    result = web_api._local_drop_intake_sync(payload)
+    result = api.ingestion._local_drop_intake_sync(payload)
 
     assert result["summary"]["accepted"] == 1
     assert result["summary"]["skipped"] == 1
@@ -1878,31 +1886,31 @@ def test_local_drop_intake_dedupes_paths(monkeypatch, tmp_path):
 
 
 def test_local_drop_intake_blocks_when_local_ingest_running(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
-    with web_api.LOCAL_INGEST_LOCK:
-        web_api.LOCAL_INGEST_STATE["running"] = True
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
+    with api.common.LOCAL_INGEST_LOCK:
+        api.common.LOCAL_INGEST_STATE["running"] = True
     try:
-        payload = web_api.LocalIngestDropIntakeRequest(session_id="s4", source_tab="vault", paths=["C:/tmp/a.jpg"])
+        payload = api.ingestion.LocalIngestDropIntakeRequest(session_id="s4", source_tab="vault", paths=["C:/tmp/a.jpg"])
         with pytest.raises(HTTPException) as exc:
-            web_api._local_drop_intake_sync(payload)
+            api.ingestion._local_drop_intake_sync(payload)
         assert exc.value.status_code == 409
     finally:
-        with web_api.LOCAL_INGEST_LOCK:
-            web_api.LOCAL_INGEST_STATE["running"] = False
+        with api.common.LOCAL_INGEST_LOCK:
+            api.common.LOCAL_INGEST_STATE["running"] = False
 
 
 def test_local_drop_intake_blocks_when_online_ingest_running(monkeypatch, tmp_path):
-    (web_api,) = fresh_backend(monkeypatch, tmp_path, "web_api")
-    acquired = web_api.INGESTION_LOCK.acquire(blocking=False)
+    (api,) = fresh_backend(monkeypatch, tmp_path, "api")
+    acquired = api.ingestion.INGESTION_LOCK.acquire(blocking=False)
     assert acquired is True
     try:
-        payload = web_api.LocalIngestDropIntakeRequest(session_id="s5", source_tab="vault", paths=["C:/tmp/a.jpg"])
+        payload = api.ingestion.LocalIngestDropIntakeRequest(session_id="s5", source_tab="vault", paths=["C:/tmp/a.jpg"])
         with pytest.raises(HTTPException) as exc:
-            web_api._local_drop_intake_sync(payload)
+            api.ingestion._local_drop_intake_sync(payload)
         assert exc.value.status_code == 409
     finally:
         if acquired:
-            web_api.INGESTION_LOCK.release()
+            api.ingestion.INGESTION_LOCK.release()
 
 
 def test_mime_detection_falls_back_when_magic_returns_error_text(monkeypatch, tmp_path):
@@ -2043,7 +2051,7 @@ def test_reindex_does_not_sync_markdown_identity_fields_to_sqlite(monkeypatch, t
 
 
 def test_patch_rolls_back_db_when_markdown_write_fails(monkeypatch, tmp_path):
-    utils, sqlite_operator, web_api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "web_api")
+    utils, sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api")
     item_hash = "1" * 64
     conn = insert_mock_item(sqlite_operator, item_hash, artist="Original Artist")
     storage_id = storage_id_for(conn, item_hash)
@@ -2054,9 +2062,9 @@ def test_patch_rolls_back_db_when_markdown_write_fails(monkeypatch, tmp_path):
     def fail_write(path, text, encoding="utf-8"):
         raise OSError("disk full")
 
-    monkeypatch.setattr(web_api, "atomic_write_text", fail_write)
+    monkeypatch.setattr(api.library, "atomic_write_text", fail_write)
     with pytest.raises(OSError):
-        web_api._update_item_sync(item_hash, web_api.ItemUpdate(artist="New Artist"))
+        api.library._update_item_sync(item_hash, api.library.ItemUpdate(artist="New Artist"))
 
     conn = sqlite_operator.init_database()
     artist = conn.execute("SELECT source_artist FROM items WHERE hash = ?", (item_hash,)).fetchone()[0]
@@ -2415,7 +2423,7 @@ def test_topic_normalize_backup_uses_workspace_root(monkeypatch, tmp_path):
 
 
 def test_review_replace_preserves_old_sqlite_identity_and_manual_indexed_metadata(monkeypatch, tmp_path):
-    utils, sqlite_operator, web_api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "web_api")
+    utils, sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api")
     old_hash = "3" * 64
     new_hash = "4" * 64
     conn = insert_mock_item(sqlite_operator, old_hash, artist="Old DB Artist", date_added="2026-01-01 00:00:00")
@@ -2434,7 +2442,7 @@ def test_review_replace_preserves_old_sqlite_identity_and_manual_indexed_metadat
     def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, sync_index=True, **kwargs):
         conn = insert_mock_item(sqlite_operator, new_hash, artist="New Artist", date_added="2026-02-02 00:00:00")
         new_storage_id = storage_id_for(conn, new_hash)
-        md = web_api.generate_markdown(conn, new_hash)
+        md = api.common.generate_markdown(conn, new_hash)
         note_path = utils.note_path_for(new_hash, new_storage_id)
         note_path.parent.mkdir(parents=True, exist_ok=True)
         utils.atomic_write_text(note_path, md)
@@ -2443,10 +2451,10 @@ def test_review_replace_preserves_old_sqlite_identity_and_manual_indexed_metadat
             path.unlink()
         return True, "ok", {"file_hash": new_hash}
 
-    monkeypatch.setattr(web_api, "process_file", fake_process_file)
-    monkeypatch.setattr(web_api, "_delete_item_after_replacement", lambda target_hash, **kwargs: {"hash": target_hash, "status": "deleted", "cleanup_errors": []})
+    monkeypatch.setattr(api.review, "process_file", fake_process_file)
+    monkeypatch.setattr(api.review, "_delete_item_after_replacement", lambda target_hash, **kwargs: {"hash": target_hash, "status": "deleted", "cleanup_errors": []})
 
-    result = web_api._review_action_sync("replacement.jpg", "replace")
+    result = api.review._review_action_sync("replacement.jpg", "replace")
     conn = sqlite_operator.init_database()
     new_storage_id = storage_id_for(conn, new_hash)
     conn.close()
@@ -2460,8 +2468,8 @@ def test_review_replace_preserves_old_sqlite_identity_and_manual_indexed_metadat
 
 
 def test_review_multi_match_and_safe_specific_replace(monkeypatch, tmp_path):
-    utils, sqlite_operator, web_api, processor, api_review = fresh_backend(
-        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "web_api", "processor", "api.review"
+    utils, sqlite_operator, api, processor, api_review = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api", "processor", "api.review"
     )
 
     # 1. Test processor.find_visual_duplicate with return_all=True
@@ -2505,7 +2513,7 @@ def test_review_multi_match_and_safe_specific_replace(monkeypatch, tmp_path):
     def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, **kwargs):
         conn = insert_mock_item(sqlite_operator, "new-hash", artist="Staged Artist")
         new_storage_id = storage_id_for(conn, "new-hash")
-        md = web_api.generate_markdown(conn, "new-hash")
+        md = api.common.generate_markdown(conn, "new-hash")
         note_path = utils.note_path_for("new-hash", new_storage_id)
         note_path.parent.mkdir(parents=True, exist_ok=True)
         utils.atomic_write_text(note_path, md)
@@ -2519,7 +2527,6 @@ def test_review_multi_match_and_safe_specific_replace(monkeypatch, tmp_path):
         deleted_targets.append(target_hash)
         return {"hash": target_hash, "status": "deleted", "cleanup_errors": []}
 
-    monkeypatch.setattr(web_api, "process_file", fake_process_file)
     monkeypatch.setattr(api_review, "process_file", fake_process_file)
     monkeypatch.setattr(api_review, "_delete_item_after_replacement", fake_delete_item)
 
@@ -3041,16 +3048,16 @@ def test_metadata_status_includes_maintenance_rebuild_job(monkeypatch, tmp_path)
 
 
 def test_metadata_rebuild_api_starts_maintenance_job(monkeypatch, tmp_path):
-    web_api, = fresh_backend(monkeypatch, tmp_path, "web_api")
+    api, = fresh_backend(monkeypatch, tmp_path, "api")
     calls = []
 
     def fake_start(full=False, maintenance=False):
         calls.append((full, maintenance))
         return {"status": "started", "full": full, "maintenance_rebuild": {"running": True}}
 
-    monkeypatch.setattr(web_api, "start_metadata_repair_worker", fake_start)
+    monkeypatch.setattr(api.runtime, "start_metadata_repair_worker", fake_start)
 
-    result = asyncio.run(web_api.rebuild_metadata_index())
+    result = asyncio.run(api.runtime.rebuild_metadata_index())
 
     assert result["status"] == "started"
     assert calls == [(True, True)]
@@ -3246,15 +3253,15 @@ def test_insert_to_database_default_timestamp_is_utc_format(monkeypatch, tmp_pat
 
 
 def test_review_state_timestamp_uses_standard_format(monkeypatch, tmp_path):
-    web_api, = fresh_backend(monkeypatch, tmp_path, "web_api")
-    updated = web_api._set_review_state({}, "resolved_delete")
+    api, = fresh_backend(monkeypatch, tmp_path, "api")
+    updated = api.common._set_review_state({}, "resolved_delete")
     value = str(updated.get("resolved_at") or "")
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value)
 
 
 def test_stream_logs_tail_then_heartbeat_and_truncate_recovery(monkeypatch, tmp_path):
-    web_api, = fresh_backend(monkeypatch, tmp_path, "web_api")
-    log_file = web_api.LOG_FILES["system.jsonl"]
+    api, = fresh_backend(monkeypatch, tmp_path, "api")
+    log_file = api.common.LOG_FILES["system.jsonl"]
     log_file.parent.mkdir(parents=True, exist_ok=True)
     log_file.write_text('{"message":"tail"}\n', encoding="utf-8")
 
@@ -3267,11 +3274,11 @@ def test_stream_logs_tail_then_heartbeat_and_truncate_recovery(monkeypatch, tmp_
     async def fake_sleep(_seconds):
         return None
 
-    monkeypatch.setattr(web_api.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(web_api.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(api.logs.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(api.logs.asyncio, "sleep", fake_sleep)
 
     async def _run():
-        response = await web_api.stream_logs("system.jsonl")
+        response = await api.logs.stream_logs("system.jsonl")
         gen = response.body_iterator
         first = await gen.__anext__()
         second = await gen.__anext__()
@@ -3290,13 +3297,13 @@ def test_stream_logs_tail_then_heartbeat_and_truncate_recovery(monkeypatch, tmp_
     assert "keep-alive" in second_text
     assert "after-clear" in third_text
 
-    console_file = web_api._log_file_for("system.jsonl", source="console")
+    console_file = api.common._log_file_for("system.jsonl", source="console")
     assert console_file.name == "console.log"
     console_file.parent.mkdir(parents=True, exist_ok=True)
     console_file.write_text("console-tail\n", encoding="utf-8")
 
     async def _run_console():
-        response = await web_api.stream_logs("system.jsonl", source="console")
+        response = await api.logs.stream_logs("system.jsonl", source="console")
         gen = response.body_iterator
         first_console = await gen.__anext__()
         await gen.aclose()
@@ -3308,24 +3315,24 @@ def test_stream_logs_tail_then_heartbeat_and_truncate_recovery(monkeypatch, tmp_
 
     log_file.write_text('{"message":"structured-kept"}\n', encoding="utf-8")
     console_file.write_text("console-to-clear\n", encoding="utf-8")
-    assert web_api._clear_all_logs_sync("console") == {"status": "success"}
+    assert api.logs._clear_all_logs_sync("console") == {"status": "success"}
     assert console_file.read_text(encoding="utf-8") == ""
     assert "structured-kept" in log_file.read_text(encoding="utf-8")
 
 
 def test_topic_filter_not_ready_skips_disk_scan(monkeypatch, tmp_path):
-    web_api, = fresh_backend(monkeypatch, tmp_path, "web_api")
+    api, = fresh_backend(monkeypatch, tmp_path, "api")
     repair_calls = []
-    monkeypatch.setattr(web_api, "metadata_index_ready", lambda conn: False)
-    monkeypatch.setattr(web_api, "start_metadata_repair_worker", lambda full=False: repair_calls.append(full) or {"status": "started"})
-    monkeypatch.setattr(web_api, "load_note_topics", lambda *args: (_ for _ in ()).throw(AssertionError("note scan called")))
+    monkeypatch.setattr(api.library, "metadata_index_ready", lambda conn: False)
+    monkeypatch.setattr(api.library, "start_metadata_repair_worker", lambda full=False: repair_calls.append(full) or {"status": "started"})
+    monkeypatch.setattr(api.library, "load_note_topics", lambda *args: (_ for _ in ()).throw(AssertionError("note scan called")))
 
-    result = web_api._get_items_sync(None, None, "newest", "all", [], [], [], ["topic"], [], [], None, 25)
+    result = api.library._get_items_sync(None, None, "newest", "all", [], [], [], ["topic"], [], [], None, 25)
 
     assert result == {"items": [], "has_more": False, "next_cursor": None}
     assert repair_calls == [False]
 
-    facet = web_api._get_facets_sync("topic", "topic", 25)
+    facet = api.library._get_facets_sync("topic", "topic", 25)
 
     assert facet == {"kind": "topic", "items": []}
     assert repair_calls == [False, False]
@@ -3354,13 +3361,13 @@ def test_metadata_facets_keep_counts_correct(monkeypatch, tmp_path):
 
 
 def test_metadata_facet_counts_refresh_and_fallback(monkeypatch, tmp_path):
-    utils, sqlite_operator, metadata_index, web_api = fresh_backend(
+    utils, sqlite_operator, metadata_index, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "metadata_index",
-        "web_api",
+        "api",
     )
     item_hash = "41" * 32
     conn = insert_mock_item(sqlite_operator, item_hash)
@@ -3385,7 +3392,7 @@ def test_metadata_facet_counts_refresh_and_fallback(monkeypatch, tmp_path):
     conn.commit()
     conn.close()
 
-    facet = web_api._get_facets_sync("wd_tag", "", 10)
+    facet = api.library._get_facets_sync("wd_tag", "", 10)
     assert facet == {"kind": "wd_tag", "items": [{"value": "New Tag", "count": 1, "tag_type": "general"}]}
 
 
@@ -3624,12 +3631,12 @@ def test_replace_final_trash_cleanup_failure_reports_error(monkeypatch, tmp_path
 
 
 def test_review_replace_warns_when_old_target_cleanup_incomplete(monkeypatch, tmp_path):
-    utils, sqlite_operator, web_api, api_review = fresh_backend(
+    utils, sqlite_operator, api, api_review = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
-        "web_api",
+        "api",
         "api.review",
     )
     old_hash = "58" * 32
@@ -3870,13 +3877,13 @@ def test_wd_cache_publication_refuses_deleted_owner(monkeypatch, tmp_path):
 
 
 def test_item_details_include_topic_and_wd_counts(monkeypatch, tmp_path):
-    utils, sqlite_operator, metadata_index, web_api = fresh_backend(
+    utils, sqlite_operator, metadata_index, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "metadata_index",
-        "web_api",
+        "api",
     )
     item_a = "91" * 32
     item_b = "92" * 32
@@ -3892,7 +3899,7 @@ def test_item_details_include_topic_and_wd_counts(monkeypatch, tmp_path):
     conn.commit()
     conn.close()
 
-    detail = web_api._get_item_sync(item_a)
+    detail = api.library._get_item_sync(item_a)
 
     assert detail["topic_counts"]["Shared Topic"] == 2
     assert detail["wd_tag_counts"]["safe"] == 2
@@ -3900,13 +3907,13 @@ def test_item_details_include_topic_and_wd_counts(monkeypatch, tmp_path):
 
 
 def test_patch_item_updates_topics_and_wd_frontmatter_for_one_item(monkeypatch, tmp_path):
-    utils, sqlite_operator, metadata_index, web_api = fresh_backend(
+    utils, sqlite_operator, metadata_index, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "metadata_index",
-        "web_api",
+        "api",
     )
     item_a = "93" * 32
     item_b = "94" * 32
@@ -3932,9 +3939,9 @@ def test_patch_item_updates_topics_and_wd_frontmatter_for_one_item(monkeypatch, 
     conn.commit()
     conn.close()
 
-    result = web_api._update_item_sync(
+    result = api.library._update_item_sync(
         item_a,
-        web_api.ItemUpdate(
+        api.library.ItemUpdate(
             topics=["keep", "promote me"],
             wd_rating="",
             wd_character_tags=[],
@@ -3969,7 +3976,7 @@ def test_patch_item_updates_topics_and_wd_frontmatter_for_one_item(monkeypatch, 
 
 
 def test_topic_file_creation_preserves_body_and_item_markdown_uses_links(monkeypatch, tmp_path):
-    utils, sqlite_operator, web_api, topics = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "web_api", "topics")
+    utils, sqlite_operator, api, topics = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api", "topics")
     item_hash = "95" * 32
     conn = insert_mock_item(sqlite_operator, item_hash)
     storage_id = storage_id_for(conn, item_hash)
@@ -3979,9 +3986,9 @@ def test_topic_file_creation_preserves_body_and_item_markdown_uses_links(monkeyp
     existing_topic.parent.mkdir(parents=True, exist_ok=True)
     existing_topic.write_text("---\ncreated_at: old\n---\n\npersonal notes stay\n", encoding="utf-8")
 
-    result = web_api._update_item_sync(
+    result = api.library._update_item_sync(
         item_hash,
-        web_api.ItemUpdate(topics=["syntax", "color theory"]),
+        api.library.ItemUpdate(topics=["syntax", "color theory"]),
     )
     data = frontmatter_from_markdown(note_path.read_text(encoding="utf-8"))
 
@@ -3998,22 +4005,22 @@ def test_topic_file_creation_preserves_body_and_item_markdown_uses_links(monkeyp
 
 
 def test_repeated_topic_promotions_create_each_topic_file(monkeypatch, tmp_path):
-    utils, sqlite_operator, web_api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "web_api")
+    utils, sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api")
     item_hash = "99" * 32
     conn = insert_mock_item(sqlite_operator, item_hash)
     storage_id = storage_id_for(conn, item_hash)
     conn.close()
 
-    first = web_api._update_item_sync(
+    first = api.library._update_item_sync(
         item_hash,
-        web_api.ItemUpdate(topics=["karin (blue archive)"]),
+        api.library.ItemUpdate(topics=["karin (blue archive)"]),
     )
     assert first["topics"] == ["karin_blue_archive"]
     assert (utils.TOPICS_DIR / "karin_blue_archive.md").exists()
 
-    second = web_api._update_item_sync(
+    second = api.library._update_item_sync(
         item_hash,
-        web_api.ItemUpdate(topics=["karin_blue_archive", "black hair"]),
+        api.library.ItemUpdate(topics=["karin_blue_archive", "black hair"]),
     )
     note_path = utils.note_path_for(item_hash, storage_id)
     data = frontmatter_from_markdown(note_path.read_text(encoding="utf-8"))
@@ -4052,13 +4059,13 @@ def test_metadata_index_parses_linked_and_legacy_topics(monkeypatch, tmp_path):
 
 
 def test_workspace_topic_rename_updates_linked_legacy_and_cross_vault_refs(monkeypatch, tmp_path):
-    utils, sqlite_operator, metadata_index, web_api, topics, vaults = fresh_backend(
+    utils, sqlite_operator, metadata_index, api, topics, vaults = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "metadata_index",
-        "web_api",
+        "api",
         "topics",
         "vaults",
     )
@@ -4079,7 +4086,7 @@ def test_workspace_topic_rename_updates_linked_legacy_and_cross_vault_refs(monke
     legacy_conn.commit()
     legacy_conn.close()
 
-    web_api._update_item_sync(linked_hash, web_api.ItemUpdate(topics=["Old Topic"]))
+    api.library._update_item_sync(linked_hash, api.library.ItemUpdate(topics=["Old Topic"]))
     old_topic = utils.TOPICS_DIR / "old_topic.md"
     old_topic.write_text("---\ncreated_at: old\n---\n\npersonal notes stay\n", encoding="utf-8")
 
@@ -4110,7 +4117,7 @@ def test_workspace_topic_rename_updates_linked_legacy_and_cross_vault_refs(monke
     ready_conn.commit()
     ready_conn.close()
 
-    result = web_api._rename_topic_sync("Old Topic", "New Topic")
+    result = api.library._rename_topic_sync("Old Topic", "New Topic")
 
     assert result["status"] == "success"
     assert set(result["vaults_touched"]) == {"default", "second"}
@@ -4126,9 +4133,9 @@ def test_workspace_topic_rename_updates_linked_legacy_and_cross_vault_refs(monke
     linked_data = frontmatter_from_markdown(utils.note_path_for(linked_hash, linked_storage).read_text(encoding="utf-8"))
     legacy_data = frontmatter_from_markdown(utils.note_path_for(legacy_hash, legacy_storage).read_text(encoding="utf-8"))
     rows = conn.execute("SELECT item_hash, topic, topic_norm, topic_rel, topic_key FROM item_topics ORDER BY item_hash").fetchall()
-    new_items = web_api._get_items_sync(None, None, "newest", "all", [], [], [], ["new_topic"], [], [], None, 25)
-    old_items = web_api._get_items_sync(None, None, "newest", "all", [], [], [], ["old_topic"], [], [], None, 25)
-    all_topics = web_api._get_facets_sync("topic", "", 50, "all")["items"]
+    new_items = api.library._get_items_sync(None, None, "newest", "all", [], [], [], ["new_topic"], [], [], None, 25)
+    old_items = api.library._get_items_sync(None, None, "newest", "all", [], [], [], ["old_topic"], [], [], None, 25)
+    all_topics = api.library._get_facets_sync("topic", "", 50, "all")["items"]
     conn.close()
 
     assert linked_data["topics"] == ["[new_topic](../../../../../topics/new_topic.md)"]
@@ -4152,28 +4159,28 @@ def test_workspace_topic_rename_updates_linked_legacy_and_cross_vault_refs(monke
 
 
 def test_workspace_topic_rename_rejects_missing_and_existing_target(monkeypatch, tmp_path):
-    utils, web_api = fresh_backend(monkeypatch, tmp_path, "utils", "web_api")
+    utils, api = fresh_backend(monkeypatch, tmp_path, "utils", "api")
     (utils.TOPICS_DIR / "old_topic.md").parent.mkdir(parents=True, exist_ok=True)
     (utils.TOPICS_DIR / "old_topic.md").write_text("---\n---\n", encoding="utf-8")
     (utils.TOPICS_DIR / "new_topic.md").write_text("---\n---\n", encoding="utf-8")
 
     with pytest.raises(HTTPException) as conflict:
-        web_api._rename_topic_sync("Old Topic", "New Topic")
+        api.library._rename_topic_sync("Old Topic", "New Topic")
     assert conflict.value.status_code == 409
 
     with pytest.raises(HTTPException) as missing:
-        web_api._rename_topic_sync("Missing Topic", "Other Topic")
+        api.library._rename_topic_sync("Missing Topic", "Other Topic")
     assert missing.value.status_code == 404
 
 
 def test_metadata_maintenance_wd_tag_rename_and_delete_rewrites_notes(monkeypatch, tmp_path):
-    utils, sqlite_operator, metadata_index, web_api = fresh_backend(
+    utils, sqlite_operator, metadata_index, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "metadata_index",
-        "web_api",
+        "api",
     )
     item_a = "e1" * 32
     item_b = "e2" * 32
@@ -4198,7 +4205,7 @@ def test_metadata_maintenance_wd_tag_rename_and_delete_rewrites_notes(monkeypatc
     conn.commit()
     conn.close()
 
-    renamed = web_api._rename_wd_tag_sync("Shared", "Renamed", tag_type="general")
+    renamed = api.library._rename_wd_tag_sync("Shared", "Renamed", tag_type="general")
 
     assert renamed["status"] == "success"
     assert renamed["notes_rewritten"] == 2
@@ -4208,7 +4215,7 @@ def test_metadata_maintenance_wd_tag_rename_and_delete_rewrites_notes(monkeypatc
     assert data_a["wd_tags"] == ["Renamed", "Keep General"]
     assert data_b["wd_tags"] == ["Renamed", "Other"]
 
-    deleted = web_api._delete_wd_tag_sync("Renamed")
+    deleted = api.library._delete_wd_tag_sync("Renamed")
 
     assert deleted["status"] == "success"
     assert deleted["notes_rewritten"] == 2
@@ -4230,13 +4237,13 @@ def test_metadata_maintenance_wd_tag_rename_and_delete_rewrites_notes(monkeypatc
 
 
 def test_metadata_maintenance_topic_delete_and_merge_routes_rewrite_notes(monkeypatch, tmp_path):
-    utils, sqlite_operator, metadata_index, web_api = fresh_backend(
+    utils, sqlite_operator, metadata_index, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "metadata_index",
-        "web_api",
+        "api",
     )
     merge_hash = "e3" * 32
     delete_hash = "e4" * 32
@@ -4245,11 +4252,11 @@ def test_metadata_maintenance_topic_delete_and_merge_routes_rewrite_notes(monkey
     conn = insert_mock_item(sqlite_operator, delete_hash)
     conn.close()
 
-    web_api._update_item_sync(merge_hash, web_api.ItemUpdate(topics=["Source Topic"]))
-    web_api._update_item_sync(delete_hash, web_api.ItemUpdate(topics=["Delete Topic"]))
+    api.library._update_item_sync(merge_hash, api.library.ItemUpdate(topics=["Source Topic"]))
+    api.library._update_item_sync(delete_hash, api.library.ItemUpdate(topics=["Delete Topic"]))
     (utils.TOPICS_DIR / "target_topic.md").write_text("---\ncreated_at: target\n---\n", encoding="utf-8")
 
-    merged = web_api._merge_topic_sync("Source Topic", "Target Topic")
+    merged = api.library._merge_topic_sync("Source Topic", "Target Topic")
 
     assert merged["status"] == "success"
     assert merged["notes_rewritten"] == 1
@@ -4266,7 +4273,7 @@ def test_metadata_maintenance_topic_delete_and_merge_routes_rewrite_notes(monkey
     assert merge_data["topics"] == ["[target_topic](../../../../../topics/target_topic.md)"]
     assert merge_rows == [("target_topic",)]
 
-    deleted = web_api._delete_topic_sync("Delete Topic")
+    deleted = api.library._delete_topic_sync("Delete Topic")
 
     assert deleted["status"] == "success"
     assert deleted["notes_rewritten"] == 1
@@ -4387,13 +4394,13 @@ def test_metadata_facets_empty_ready_kind_does_not_scan(monkeypatch, tmp_path):
 
 
 def test_metadata_filters_use_exact_when_available_and_partial_when_needed(monkeypatch, tmp_path):
-    utils, sqlite_operator, metadata_index, web_api = fresh_backend(
+    utils, sqlite_operator, metadata_index, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "metadata_index",
-        "web_api",
+        "api",
     )
 
     def add_item(item_hash: str, frontmatter: str, date_added: str):
@@ -4414,16 +4421,16 @@ def test_metadata_filters_use_exact_when_available_and_partial_when_needed(monke
 
     conn = sqlite_operator.init_database()
     metadata_index._set_metadata_index_ready(conn, True)
-    assert web_api._metadata_filter_has_exact(conn, "item_topics", "topic_norm", "alpha") is True
-    assert web_api._metadata_filter_has_exact(conn, "item_topics", "topic_norm", "alph") is False
-    assert web_api._metadata_filter_has_exact(conn, "item_wd_tags", "tag_norm", "wd-one") is True
+    assert api.library._metadata_filter_has_exact(conn, "item_topics", "topic_norm", "alpha") is True
+    assert api.library._metadata_filter_has_exact(conn, "item_topics", "topic_norm", "alph") is False
+    assert api.library._metadata_filter_has_exact(conn, "item_wd_tags", "tag_norm", "wd-one") is True
     conn.commit()
     conn.close()
 
-    exact_topic = web_api._get_items_sync(None, None, "newest", "all", [], [], [], ["alpha"], [], [], None, 25)
-    partial = web_api._get_items_sync(None, None, "newest", "all", [], [], [], ["alph"], [], [], None, 25)
-    exact = web_api._get_items_sync(None, None, "newest", "all", [], [], [], ["beta"], [], [], None, 25)
-    wd_exact = web_api._get_items_sync(None, None, "newest", "all", [], [], [], [], ["wd-one"], [], None, 25)
+    exact_topic = api.library._get_items_sync(None, None, "newest", "all", [], [], [], ["alpha"], [], [], None, 25)
+    partial = api.library._get_items_sync(None, None, "newest", "all", [], [], [], ["alph"], [], [], None, 25)
+    exact = api.library._get_items_sync(None, None, "newest", "all", [], [], [], ["beta"], [], [], None, 25)
+    wd_exact = api.library._get_items_sync(None, None, "newest", "all", [], [], [], [], ["wd-one"], [], None, 25)
 
     assert [item["hash"] for item in exact_topic["items"]] == [alpha_hash]
     assert [item["hash"] for item in partial["items"]] == [alpha_extra_hash, alpha_hash]
@@ -4432,13 +4439,13 @@ def test_metadata_filters_use_exact_when_available_and_partial_when_needed(monke
 
 
 def test_artist_platform_facets_and_filters_use_exact_first(monkeypatch, tmp_path):
-    utils, sqlite_operator, metadata_index, web_api = fresh_backend(
+    utils, sqlite_operator, metadata_index, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "metadata_index",
-        "web_api",
+        "api",
     )
 
     def add_item(item_hash: str, artist: str, platform: str, date_added: str):
@@ -4457,11 +4464,11 @@ def test_artist_platform_facets_and_filters_use_exact_first(monkeypatch, tmp_pat
     add_item(artist_extra_hash, "artist11", "site11", "2026-01-01 00:00:02")
     add_item(platform_hash, "other", "site1", "2026-01-01 00:00:03")
 
-    artist_facets = web_api._get_facets_sync("artist", "artist", 10)
-    platform_facets = web_api._get_facets_sync("platform", "site", 10)
-    exact_artist = web_api._get_items_sync(None, None, "newest", "all", ["artist1"], [], [], [], [], [], None, 25)
-    partial_artist = web_api._get_items_sync(None, None, "newest", "all", ["artist"], [], [], [], [], [], None, 25)
-    exact_platform = web_api._get_items_sync(None, None, "newest", "all", [], ["site1"], [], [], [], [], None, 25)
+    artist_facets = api.library._get_facets_sync("artist", "artist", 10)
+    platform_facets = api.library._get_facets_sync("platform", "site", 10)
+    exact_artist = api.library._get_items_sync(None, None, "newest", "all", ["artist1"], [], [], [], [], [], None, 25)
+    partial_artist = api.library._get_items_sync(None, None, "newest", "all", ["artist"], [], [], [], [], [], None, 25)
+    exact_platform = api.library._get_items_sync(None, None, "newest", "all", [], ["site1"], [], [], [], [], None, 25)
 
     assert artist_facets["items"][0] == {"value": "artist1", "count": 1}
     assert {item["value"] for item in platform_facets["items"]} >= {"site1", "site11"}
@@ -4503,7 +4510,7 @@ def test_artist_resolver_uses_aliases_and_skips_placeholders(monkeypatch, tmp_pa
 
 
 def test_platform_schema_backfills_and_api_lists(monkeypatch, tmp_path):
-    sqlite_operator, platforms_module, workspace_db, web_api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "platforms", "workspace_db", "web_api")
+    sqlite_operator, platforms_module, workspace_db, api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "platforms", "workspace_db", "api")
     conn = insert_mock_item(sqlite_operator, "67" * 32, artist="Platform Artist")
     conn.execute("UPDATE items SET platform = ? WHERE hash = ?", ("twitter", "67" * 32))
     conn.commit()
@@ -4513,8 +4520,8 @@ def test_platform_schema_backfills_and_api_lists(monkeypatch, tmp_path):
     workspace_conn.commit()
     workspace_conn.close()
 
-    platforms = web_api._get_platforms_sync("", 20)["items"]
-    used_platforms = web_api._get_platforms_sync("", 20, "used")["items"]
+    platforms = api.library._get_platforms_sync("", 20)["items"]
+    used_platforms = api.library._get_platforms_sync("", 20, "used")["items"]
     x_platform = next(item for item in platforms if item["display_name"] == "X")
 
     assert x_platform["key_norm"] == "x"
@@ -4524,7 +4531,7 @@ def test_platform_schema_backfills_and_api_lists(monkeypatch, tmp_path):
 
 
 def test_stats_scope_used_and_all_for_artists_and_topics(monkeypatch, tmp_path):
-    utils, sqlite_operator, artists_module, topics_module, metadata_index, workspace_db, web_api = fresh_backend(
+    utils, sqlite_operator, artists_module, topics_module, metadata_index, workspace_db, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
@@ -4533,7 +4540,7 @@ def test_stats_scope_used_and_all_for_artists_and_topics(monkeypatch, tmp_path):
         "topics",
         "metadata_index",
         "workspace_db",
-        "web_api",
+        "api",
     )
     item_hash = "68" * 32
     conn = insert_mock_item(sqlite_operator, item_hash, artist="Used Artist")
@@ -4544,8 +4551,8 @@ def test_stats_scope_used_and_all_for_artists_and_topics(monkeypatch, tmp_path):
     workspace_conn.commit()
     workspace_conn.close()
 
-    web_api._update_item_sync(item_hash, web_api.ItemUpdate(topics=["used topic"]))
-    web_api._update_item_sync(item_hash, web_api.ItemUpdate(wd_tags=["used wd tag"]))
+    api.library._update_item_sync(item_hash, api.library.ItemUpdate(topics=["used topic"]))
+    api.library._update_item_sync(item_hash, api.library.ItemUpdate(wd_tags=["used wd tag"]))
     topics_module.ensure_topic_file("unused topic")
     workspace_conn = workspace_db.connect_workspace_database()
     workspace_db.upsert_wd_dictionary_tags(workspace_conn, [("general", "unused wd tag")])
@@ -4556,12 +4563,12 @@ def test_stats_scope_used_and_all_for_artists_and_topics(monkeypatch, tmp_path):
     conn.commit()
     conn.close()
 
-    all_artists = web_api._get_artists_sync("", 20, "all")["items"]
-    used_artists = web_api._get_artists_sync("", 20, "used")["items"]
-    all_topics = web_api._get_facets_sync("topic", "", 20, "all")["items"]
-    used_topics = web_api._get_facets_sync("topic", "", 20, "used")["items"]
-    all_wd = web_api._get_facets_sync("wd_tag", "", 20, "all")["items"]
-    used_wd = web_api._get_facets_sync("wd_tag", "", 20, "used")["items"]
+    all_artists = api.library._get_artists_sync("", 20, "all")["items"]
+    used_artists = api.library._get_artists_sync("", 20, "used")["items"]
+    all_topics = api.library._get_facets_sync("topic", "", 20, "all")["items"]
+    used_topics = api.library._get_facets_sync("topic", "", 20, "used")["items"]
+    all_wd = api.library._get_facets_sync("wd_tag", "", 20, "all")["items"]
+    used_wd = api.library._get_facets_sync("wd_tag", "", 20, "used")["items"]
 
     assert any(item["name"] == "Unused Artist" and item["item_count"] == 0 for item in all_artists)
     assert all(item["item_count"] > 0 for item in used_artists)
@@ -4572,22 +4579,22 @@ def test_stats_scope_used_and_all_for_artists_and_topics(monkeypatch, tmp_path):
 
 
 def test_artist_api_lists_details_and_edits(monkeypatch, tmp_path):
-    utils, sqlite_operator, web_api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "web_api")
+    utils, sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api")
     item_hash = "63" * 32
     conn = insert_mock_item(sqlite_operator, item_hash, artist="Artist API")
     conn.close()
 
-    listing = web_api._get_artists_sync("", 10)
+    listing = api.library._get_artists_sync("", 10)
     artist = next(item for item in listing["items"] if item["name"] == "Artist API")
-    detail = web_api._get_artist_sync(artist["id"])
-    alias = web_api._post_artist_alias_sync(artist["id"], web_api.ArtistAliasCreate(alias="API Alias"))
-    link = web_api._post_artist_link_sync(
+    detail = api.library._get_artist_sync(artist["id"])
+    alias = api.library._post_artist_alias_sync(artist["id"], api.library.ArtistAliasCreate(alias="API Alias"))
+    link = api.library._post_artist_link_sync(
         artist["id"],
-        web_api.ArtistLinkCreate(platform="twitter2", url="https://x.com/api_artist"),
+        api.library.ArtistLinkCreate(platform="twitter2", url="https://x.com/api_artist"),
     )
-    updated = web_api._patch_artist_sync(
+    updated = api.library._patch_artist_sync(
         artist["id"],
-        web_api.ArtistUpdate(name="Artist Canonical", kind="brand", notes="note"),
+        api.library.ArtistUpdate(name="Artist Canonical", kind="brand", notes="note"),
     )
 
     assert artist["item_count"] == 1
@@ -4605,49 +4612,49 @@ def test_artist_api_lists_details_and_edits(monkeypatch, tmp_path):
     assert note_data["artist"] == "Artist Canonical"
     conn.close()
 
-    deleted_alias = web_api._delete_alias_sync(artist["id"], alias["id"])
-    deleted_link = web_api._delete_link_sync(artist["id"], link["id"])
+    deleted_alias = api.library._delete_alias_sync(artist["id"], alias["id"])
+    deleted_link = api.library._delete_link_sync(artist["id"], link["id"])
     assert deleted_alias == {"status": "success"}
     assert deleted_link == {"status": "success"}
 
 
 def test_artist_api_rejects_duplicate_names_and_aliases(monkeypatch, tmp_path):
-    sqlite_operator, web_api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "web_api")
+    sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "api")
     conn = insert_mock_item(sqlite_operator, "64" * 32, artist="Artist A")
     conn.close()
     conn = insert_mock_item(sqlite_operator, "65" * 32, artist="Artist B")
     conn.close()
 
-    artists = web_api._get_artists_sync("", 10)["items"]
+    artists = api.library._get_artists_sync("", 10)["items"]
     artist_a = next(item for item in artists if item["name"] == "Artist A")
     artist_b = next(item for item in artists if item["name"] == "Artist B")
 
     with pytest.raises(HTTPException) as duplicate_name:
-        web_api._patch_artist_sync(artist_b["id"], web_api.ArtistUpdate(name="Artist A"))
+        api.library._patch_artist_sync(artist_b["id"], api.library.ArtistUpdate(name="Artist A"))
     assert duplicate_name.value.status_code == 409
 
     with pytest.raises(HTTPException) as duplicate_alias:
-        web_api._post_artist_alias_sync(artist_a["id"], web_api.ArtistAliasCreate(alias="Artist B"))
+        api.library._post_artist_alias_sync(artist_a["id"], api.library.ArtistAliasCreate(alias="Artist B"))
     assert duplicate_alias.value.status_code == 409
 
     with pytest.raises(HTTPException) as empty_link:
-        web_api._post_artist_link_sync(artist_a["id"], web_api.ArtistLinkCreate(platform="", url=""))
+        api.library._post_artist_link_sync(artist_a["id"], api.library.ArtistLinkCreate(platform="", url=""))
     assert empty_link.value.status_code == 400
 
     with pytest.raises(HTTPException) as placeholder_name:
-        web_api._patch_artist_sync(artist_a["id"], web_api.ArtistUpdate(name="Unknown"))
+        api.library._patch_artist_sync(artist_a["id"], api.library.ArtistUpdate(name="Unknown"))
     assert placeholder_name.value.status_code == 400
 
 
 def test_artist_merge_absorbs_sources_and_rewrites_items(monkeypatch, tmp_path):
-    utils, sqlite_operator, artists, workspace_db, web_api = fresh_backend(
+    utils, sqlite_operator, artists, workspace_db, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "artists",
         "workspace_db",
-        "web_api",
+        "api",
     )
     target_hash = "68" * 32
     source_hash = "69" * 32
@@ -4660,12 +4667,12 @@ def test_artist_merge_absorbs_sources_and_rewrites_items(monkeypatch, tmp_path):
         (alias_hash, "old nix"),
     ]:
         conn = insert_mock_item(sqlite_operator, item_hash, artist=artist_name)
-        md_content = web_api.generate_markdown(conn, item_hash)
+        md_content = api.common.generate_markdown(conn, item_hash)
         row = conn.execute("SELECT storage_id FROM items WHERE hash = ?", (item_hash,)).fetchone()
         utils.atomic_write_text(utils.note_path_for(item_hash, row[0]), md_content)
         conn.close()
 
-    listing = web_api._get_artists_sync("", 20)["items"]
+    listing = api.library._get_artists_sync("", 20)["items"]
     ids = {artist["name"]: artist["id"] for artist in listing}
     workspace_conn = workspace_db.connect_workspace_database()
     workspace_conn.execute("DELETE FROM artists WHERE id = ?", (ids["old nix"],))
@@ -4678,9 +4685,9 @@ def test_artist_merge_absorbs_sources_and_rewrites_items(monkeypatch, tmp_path):
     workspace_conn.commit()
     workspace_conn.close()
 
-    preview = web_api._preview_artist_merge_sync(
+    preview = api.library._preview_artist_merge_sync(
         ids["iomayashi"],
-        web_api.ArtistMergeRequest(source_artist_ids=[ids["nixeu"], ids["iomaya"]]),
+        api.library.ArtistMergeRequest(source_artist_ids=[ids["nixeu"], ids["iomaya"]]),
     )
     assert preview["affected_items"] == 3
     assert {alias["value"] for alias in preview["aliases"]["add"]} == {"nixeu", "iomaya"}
@@ -4696,9 +4703,9 @@ def test_artist_merge_absorbs_sources_and_rewrites_items(monkeypatch, tmp_path):
     conn.close()
     workspace_conn.close()
 
-    merged = web_api._merge_artist_sync(
+    merged = api.library._merge_artist_sync(
         ids["iomayashi"],
-        web_api.ArtistMergeRequest(source_artist_ids=[ids["nixeu"], ids["iomaya"]]),
+        api.library.ArtistMergeRequest(source_artist_ids=[ids["nixeu"], ids["iomaya"]]),
     )
     assert merged["merged"] is True
     assert merged["target_detail"]["name"] == "iomayashi"
@@ -4732,7 +4739,7 @@ def test_artist_merge_absorbs_sources_and_rewrites_items(monkeypatch, tmp_path):
 
 
 def test_artist_merge_preview_reports_alias_conflicts_without_mutating(monkeypatch, tmp_path):
-    sqlite_operator, artists, workspace_db, web_api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "artists", "workspace_db", "web_api")
+    sqlite_operator, artists, workspace_db, api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "artists", "workspace_db", "api")
     conn = insert_mock_item(sqlite_operator, "73" * 32, artist="Target Merge")
     conn.close()
     conn = insert_mock_item(sqlite_operator, "74" * 32, artist="Source Merge")
@@ -4740,7 +4747,7 @@ def test_artist_merge_preview_reports_alias_conflicts_without_mutating(monkeypat
     conn = insert_mock_item(sqlite_operator, "75" * 32, artist="Unrelated Merge")
     conn.close()
 
-    listing = web_api._get_artists_sync("", 20)["items"]
+    listing = api.library._get_artists_sync("", 20)["items"]
     ids = {artist["name"]: artist["id"] for artist in listing}
     workspace_conn = workspace_db.connect_workspace_database()
     artists.add_artist_alias(workspace_conn, ids["Source Merge"], "conflict alias")
@@ -4751,9 +4758,9 @@ def test_artist_merge_preview_reports_alias_conflicts_without_mutating(monkeypat
     workspace_conn.commit()
     workspace_conn.close()
 
-    preview = web_api._preview_artist_merge_sync(
+    preview = api.library._preview_artist_merge_sync(
         ids["Target Merge"],
-        web_api.ArtistMergeRequest(source_artist_ids=[ids["Source Merge"]]),
+        api.library.ArtistMergeRequest(source_artist_ids=[ids["Source Merge"]]),
     )
 
     assert {alias["value"] for alias in preview["aliases"]["move"]} == {"conflict alias"}
@@ -4768,7 +4775,7 @@ def test_artist_merge_preview_reports_alias_conflicts_without_mutating(monkeypat
 
 
 def test_artist_merge_rejects_invalid_sources(monkeypatch, tmp_path):
-    sqlite_operator, workspace_db, web_api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "workspace_db", "web_api")
+    sqlite_operator, workspace_db, api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "workspace_db", "api")
     conn = insert_mock_item(sqlite_operator, "72" * 32, artist="Merge Target")
     workspace_conn = workspace_db.connect_workspace_database()
     workspace_conn.execute(
@@ -4781,22 +4788,22 @@ def test_artist_merge_rejects_invalid_sources(monkeypatch, tmp_path):
     placeholder_id = workspace_conn.execute("SELECT id FROM artists WHERE name_norm = 'unknown'").fetchone()[0]
     workspace_conn.close()
     conn.close()
-    artist = next(item for item in web_api._get_artists_sync("", 10)["items"] if item["name"] == "Merge Target")
+    artist = next(item for item in api.library._get_artists_sync("", 10)["items"] if item["name"] == "Merge Target")
 
     with pytest.raises(HTTPException) as empty_sources:
-        web_api._preview_artist_merge_sync(artist["id"], web_api.ArtistMergeRequest(source_artist_ids=[]))
+        api.library._preview_artist_merge_sync(artist["id"], api.library.ArtistMergeRequest(source_artist_ids=[]))
     assert empty_sources.value.status_code == 400
 
     with pytest.raises(HTTPException) as self_merge:
-        web_api._merge_artist_sync(artist["id"], web_api.ArtistMergeRequest(source_artist_ids=[artist["id"]]))
+        api.library._merge_artist_sync(artist["id"], api.library.ArtistMergeRequest(source_artist_ids=[artist["id"]]))
     assert self_merge.value.status_code == 400
 
     with pytest.raises(HTTPException) as placeholder_source:
-        web_api._merge_artist_sync(artist["id"], web_api.ArtistMergeRequest(source_artist_ids=[placeholder_id]))
+        api.library._merge_artist_sync(artist["id"], api.library.ArtistMergeRequest(source_artist_ids=[placeholder_id]))
     assert placeholder_source.value.status_code == 400
 
     with pytest.raises(HTTPException) as placeholder_target:
-        web_api._merge_artist_sync(placeholder_id, web_api.ArtistMergeRequest(source_artist_ids=[artist["id"]]))
+        api.library._merge_artist_sync(placeholder_id, api.library.ArtistMergeRequest(source_artist_ids=[artist["id"]]))
     assert placeholder_target.value.status_code == 400
 
 
@@ -5277,34 +5284,48 @@ def test_thumbnail_and_wd_repairs_ignore_non_media_rows(monkeypatch, tmp_path):
 
 
 def test_thumbnail_api_returns_503_when_generation_is_busy(monkeypatch, tmp_path):
-    sqlite_operator, web_api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "web_api")
+    sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "api")
     item_hash = "c" * 64
     conn = insert_mock_item(sqlite_operator, item_hash)
     conn.close()
 
     def busy(*args, **kwargs):
-        raise web_api.ThumbnailBusyError("busy")
+        raise api.common.ThumbnailBusyError("busy")
 
-    monkeypatch.setattr(web_api, "get_or_generate_thumbnail", busy)
+    monkeypatch.setattr(api.library, "get_or_generate_thumbnail", busy)
 
     with pytest.raises(HTTPException) as exc:
-        web_api._get_thumbnail_sync(item_hash)
+        api.library._get_thumbnail_sync(item_hash)
 
     assert exc.value.status_code == 503
 
 
 def test_no_duplicate_thumbnail_generation_paths_outside_thumbnail_module(monkeypatch, tmp_path):
-    processor, web_api = fresh_backend(monkeypatch, tmp_path, "processor", "web_api")
+    processor, api = fresh_backend(monkeypatch, tmp_path, "processor", "api")
 
     processor_source = inspect.getsource(processor)
-    web_api_source = inspect.getsource(web_api)
+    api_source = "\n".join(
+        inspect.getsource(module)
+        for module in (
+            api.app,
+            api.app_settings,
+            api.capture,
+            api.common,
+            api.guards,
+            api.ingestion,
+            api.library,
+            api.logs,
+            api.review,
+            api.runtime,
+        )
+    )
 
     assert "ensure_thumbnail(" in inspect.getsource(processor.process_file)
-    assert "get_or_generate_thumbnail(" in inspect.getsource(web_api._get_thumbnail_sync)
+    assert "get_or_generate_thumbnail(" in inspect.getsource(api.library._get_thumbnail_sync)
     assert "generate_image_thumbnail(" not in processor_source
     assert "generate_video_thumbnail(" not in processor_source
-    assert "generate_image_thumbnail(" not in web_api_source
-    assert "generate_video_thumbnail(" not in web_api_source
+    assert "generate_image_thumbnail(" not in api_source
+    assert "generate_video_thumbnail(" not in api_source
 
 
 def test_sampled_video_extraction_uses_one_ffmpeg_subprocess(monkeypatch, tmp_path):
@@ -5544,7 +5565,7 @@ def test_search_manager_runtime_logs_route_to_system(monkeypatch, tmp_path):
 
 
 def test_local_ingest_worker_emits_local_and_audit_logs(monkeypatch, tmp_path):
-    web_api, = fresh_backend(monkeypatch, tmp_path, "web_api")
+    api, = fresh_backend(monkeypatch, tmp_path, "api")
     source = tmp_path / "source.jpg"
     source.write_bytes(b"image")
     local_calls = []
@@ -5557,12 +5578,12 @@ def test_local_ingest_worker_emits_local_and_audit_logs(monkeypatch, tmp_path):
             path.unlink()
         return True, "Success: source.jpg", {"file_hash": "abc", "phash": None, "url": "", "tiles": []}
 
-    monkeypatch.setattr(web_api, "process_file", fake_process_file)
-    monkeypatch.setattr(web_api, "log_ingest_local", lambda level, message, **kwargs: local_calls.append((level, message, kwargs)))
-    monkeypatch.setattr(web_api, "log_ingest_audit", lambda level, message, **kwargs: audit_calls.append((level, message, kwargs)))
+    monkeypatch.setattr(api.ingestion, "process_file", fake_process_file)
+    monkeypatch.setattr(api.ingestion, "log_ingest_local", lambda level, message, **kwargs: local_calls.append((level, message, kwargs)))
+    monkeypatch.setattr(api.ingestion, "log_ingest_audit", lambda level, message, **kwargs: audit_calls.append((level, message, kwargs)))
 
-    web_api._prepare_local_ingest_run("run-local", {"artist": "A", "platform": "Local"}, False, 1)
-    web_api._run_local_ingest_worker([str(source)], {"artist": "A", "platform": "Local"}, False, "run-local")
+    api.ingestion._prepare_local_ingest_run("run-local", {"artist": "A", "platform": "Local"}, False, 1)
+    api.ingestion._run_local_ingest_worker([str(source)], {"artist": "A", "platform": "Local"}, False, "run-local")
 
     local_messages = [call[1] for call in local_calls]
     assert "Local ingest run started" in local_messages
@@ -5584,14 +5605,14 @@ def test_multi_vault_shared_workspace_metadata(monkeypatch, tmp_path):
     - Prune removes metadata not referenced by any vault
     - Scope=all facets include entries from all vaults
     """
-    vaults, utils, sqlite_operator, workspace_db, web_api = fresh_backend(
+    vaults, utils, sqlite_operator, workspace_db, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "vaults",
         "utils",
         "db.sqlite_operator",
         "workspace_db",
-        "web_api",
+        "api",
     )
 
     # ── Create a second vault ──
@@ -5641,7 +5662,7 @@ def test_multi_vault_shared_workspace_metadata(monkeypatch, tmp_path):
     assert "instagram" in platform_norms
 
     # ── Verify counts are scoped to active vault (default) ──
-    all_artists = web_api._get_artists_sync("", 50, "all")["items"]
+    all_artists = api.library._get_artists_sync("", 50, "all")["items"]
     artist_map = {a["name"]: a for a in all_artists}
 
     # Default Artist has 1 item in the active vault
@@ -5650,18 +5671,18 @@ def test_multi_vault_shared_workspace_metadata(monkeypatch, tmp_path):
     assert artist_map["Second Vault Artist"]["item_count"] == 0
 
     # ── Verify used_only filters correctly ──
-    used_artists = web_api._get_artists_sync("", 50, "used")["items"]
+    used_artists = api.library._get_artists_sync("", 50, "used")["items"]
     used_names = {a["name"] for a in used_artists}
     assert "Default Artist" in used_names
     assert "Second Vault Artist" not in used_names
 
     # ── Verify facets scope=all includes workspace data ──
-    all_artist_facets = web_api._get_facets_sync("artist", "", 50, "all")["items"]
+    all_artist_facets = api.library._get_facets_sync("artist", "", 50, "all")["items"]
     facet_values = {item["value"] for item in all_artist_facets}
     assert "Default Artist" in facet_values
     assert "Second Vault Artist" in facet_values
 
-    all_platform_facets = web_api._get_facets_sync("platform", "", 50, "all")["items"]
+    all_platform_facets = api.library._get_facets_sync("platform", "", 50, "all")["items"]
     platform_values = {item["value"] for item in all_platform_facets}
     assert "Pixiv" in platform_values
     assert "Instagram" in platform_values
@@ -5762,12 +5783,12 @@ def test_vault_health_dictionary_drift_uses_all_workspace_vaults(monkeypatch, tm
 
 
 def test_artist_used_scope_filters_before_limit(monkeypatch, tmp_path):
-    sqlite_operator, workspace_db, web_api = fresh_backend(
+    sqlite_operator, workspace_db, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "db.sqlite_operator",
         "workspace_db",
-        "web_api",
+        "api",
     )
 
     conn = insert_mock_item(sqlite_operator, "u1" * 32, artist="Zzz Used Artist")
@@ -5787,12 +5808,12 @@ def test_artist_used_scope_filters_before_limit(monkeypatch, tmp_path):
     finally:
         ws_conn.close()
 
-    used_artists = web_api._get_artists_sync("", 20, "used")["items"]
+    used_artists = api.library._get_artists_sync("", 20, "used")["items"]
     assert [artist["name"] for artist in used_artists] == ["Zzz Used Artist"]
 
 
 def test_vault_transition_preflight_rejects_before_mutation(monkeypatch, tmp_path):
-    vaults, web_api = fresh_backend(monkeypatch, tmp_path, "vaults", "web_api")
+    vaults, api = fresh_backend(monkeypatch, tmp_path, "vaults", "api")
     ctx = vaults._ctx()
     before_config = ctx.config_path.read_bytes()
     ingestion = importlib.import_module("api.ingestion")
@@ -5892,7 +5913,7 @@ def test_delete_vault_config_failure_restores_tree_and_config(monkeypatch, tmp_p
 
 
 def test_relocation_activation_failure_restores_old_path_and_removes_new_files(monkeypatch, tmp_path):
-    vaults, web_api, runtime_context = fresh_backend(monkeypatch, tmp_path, "vaults", "web_api", "runtime_context")
+    vaults, api, runtime_context = fresh_backend(monkeypatch, tmp_path, "vaults", "api", "runtime_context")
     ctx = vaults._ctx()
     old_root = ctx.active_vault.root
     target_root = ctx.root / "data" / "vaults" / "relocation-failure"
@@ -5909,7 +5930,7 @@ def test_relocation_activation_failure_restores_old_path_and_removes_new_files(m
 
     monkeypatch.setattr(search_manager_module.search_manager, "hydrate", fail_target_hydration)
     with pytest.raises(HTTPException) as exc:
-        web_api._relocate_vault_sync("default", str(target_root))
+        api.runtime._relocate_vault_sync("default", str(target_root))
 
     assert exc.value.status_code == 500
     assert ctx.config_path.read_bytes() == before_config
@@ -5918,7 +5939,7 @@ def test_relocation_activation_failure_restores_old_path_and_removes_new_files(m
 
 
 def test_relocation_config_failure_restores_old_path_and_config(monkeypatch, tmp_path):
-    vaults, web_api, runtime_context = fresh_backend(monkeypatch, tmp_path, "vaults", "web_api", "runtime_context")
+    vaults, api, runtime_context = fresh_backend(monkeypatch, tmp_path, "vaults", "api", "runtime_context")
     ctx = vaults._ctx()
     old_root = ctx.active_vault.root
     target_root = ctx.root / "data" / "vaults" / "relocation-config-failure"
@@ -5930,7 +5951,7 @@ def test_relocation_config_failure_restores_old_path_and_config(monkeypatch, tmp
 
     monkeypatch.setattr(vaults, "_write_config", fail_config_write)
     with pytest.raises(HTTPException) as exc:
-        web_api._relocate_vault_sync("default", str(target_root))
+        api.runtime._relocate_vault_sync("default", str(target_root))
 
     assert exc.value.status_code == 500
     assert ctx.config_path.read_bytes() == before_config

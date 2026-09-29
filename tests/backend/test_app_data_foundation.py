@@ -216,7 +216,7 @@ def _fresh_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.delenv("LMZ_CONFIG_PATH", raising=False)
     for name in list(sys.modules):
         if (
-            name in {"workspaces", "runtime_context", "runtime_activation", "web_api"}
+            name in {"workspaces", "runtime_context", "runtime_activation"}
             or name == "api"
             or name.startswith(("api.", "logger"))
         ):
