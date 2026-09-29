@@ -1,6 +1,20 @@
-from fastapi import APIRouter
+import asyncio
+import os
+import time
 
-from api.common import *
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from logger import log_svelte
+from pydantic import BaseModel
+
+from api.common import (
+    _log_dirs_for_source,
+    _log_file_for,
+    _log_file_signature,
+    _open_path_external,
+    _scan_auth_status_sync,
+    _tail_lines,
+)
 
 router = APIRouter()
 
@@ -151,7 +165,4 @@ def _clear_all_logs_sync(source: str = "active"):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-__all__ = [name for name in globals() if not name.startswith("__")]
 
