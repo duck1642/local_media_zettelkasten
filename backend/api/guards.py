@@ -1,7 +1,13 @@
 from fastapi import HTTPException
 from path_policy import vault_root_is_usable
-from runtime_context import get_runtime_context, RuntimeNotLoadedError, WorkspaceContext, VaultContext
 from runtime_activation import active_vault_is_usable
+from runtime_context import (
+    RuntimeNotLoadedError,
+    VaultContext,
+    WorkspaceContext,
+    get_runtime_context,
+)
+
 
 def require_workspace_context() -> WorkspaceContext:
     try:
@@ -18,7 +24,7 @@ def require_usable_vault_context() -> VaultContext:
 def require_usable_target_vault_context(vault_id: str) -> VaultContext:
     ctx = require_workspace_context()
 
-    from vaults import _vault_entry, _ctx_for_vault
+    from vaults import _ctx_for_vault, _vault_entry
     try:
         clean_id, entry, root = _vault_entry(vault_id, ctx)
     except KeyError as exc:

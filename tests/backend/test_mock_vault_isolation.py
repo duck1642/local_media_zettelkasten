@@ -1372,7 +1372,9 @@ def test_vault_import_rolls_back_on_final_move_failure(monkeypatch, tmp_path):
 
 
 def test_active_workspace_and_vault_switches_are_preflight_guarded(monkeypatch, tmp_path):
-    api, vaults, workspaces = fresh_backend(monkeypatch, tmp_path, "api", "vaults", "workspaces")
+    api, vaults, workspaces, runtime_context = fresh_backend(
+        monkeypatch, tmp_path, "api", "vaults", "workspaces", "runtime_context"
+    )
     registry_path = tmp_path / "workspaces.yaml"
     monkeypatch.setattr(workspaces, "REGISTRY_PATH", registry_path)
     workspaces.save_workspace_registry({
@@ -1389,7 +1391,7 @@ def test_active_workspace_and_vault_switches_are_preflight_guarded(monkeypatch, 
         added = api.runtime._create_workspace_sync({"path": str(workspace_parent), "name": "Guard Workspace"})
         workspace_id = next(item["id"] for item in added["items"] if item["name"] == "Guard Workspace")
 
-        ctx = api.common.get_runtime_context()
+        ctx = runtime_context.get_runtime_context()
         with api.common.local_ingest_lock(ctx):
             api.common.local_ingest_state(ctx)["running"] = True
         try:
@@ -1645,28 +1647,6 @@ def test_review_cleanup_state_and_orphan_sidecar(monkeypatch, tmp_path):
     assert not orphan.exists()
 
 
-def test_api_startup_hydrates_search_manager(monkeypatch, tmp_path):
-    runtime_context, api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "api")
-    runtime_context.reload_runtime_context()
-    calls = []
-
-    class FakeConnection:
-        def close(self):
-            calls.append("close")
-
-    class FakeSearchManager:
-        def hydrate(self, conn):
-            calls.append(("hydrate", conn))
-
-    fake_conn = FakeConnection()
-    monkeypatch.setattr(api.app, "init_database", lambda: fake_conn)
-    monkeypatch.setattr(api.app, "search_manager", FakeSearchManager())
-
-    asyncio.run(api.app.startup_search_index())
-
-    assert calls == [("hydrate", fake_conn), "close"]
-
-
 def test_review_listing_does_not_auto_resolve_pending_db_hash(monkeypatch, tmp_path):
     api, utils, sqlite_operator = fresh_backend(monkeypatch, tmp_path, "api", "utils", "db.sqlite_operator")
     item_hash = "1" * 64
@@ -1703,14 +1683,14 @@ def test_review_count_uses_cache_without_full_resolver(monkeypatch, tmp_path):
 
 
 def test_review_count_cache_ignores_resolved_variant(monkeypatch, tmp_path):
-    api, utils = fresh_backend(monkeypatch, tmp_path, "api", "utils")
+    api, utils, review_cache = fresh_backend(monkeypatch, tmp_path, "api", "utils", "review_cache")
     resolved_file = utils.REVIEW_DIR / "resolved-variant.webp"
     resolved_file.write_bytes(b"resolved")
     resolved_file.with_suffix(".webp.json").write_text(
         json.dumps({"state": "resolved_variant", "file_hash": "12" * 32}),
         encoding="utf-8",
     )
-    api.common.mark_review_cache_dirty()
+    review_cache.mark_review_cache_dirty()
 
     count = api.review._get_review_count_sync(include_resolved=True)
     items = api.review._get_review_items_sync(False)
@@ -1768,8 +1748,8 @@ def test_local_retry_preserves_defaults_and_skip_similarity(monkeypatch, tmp_pat
     (api,) = fresh_backend(monkeypatch, tmp_path, "api")
     calls = []
 
-    def fake_worker(paths, defaults, skip_similarity, run_id):
-        calls.append((paths, defaults, skip_similarity, run_id))
+    def fake_worker(paths, defaults, skip_similarity, run_id, ctx):
+        calls.append((paths, defaults, skip_similarity, run_id, ctx))
 
     monkeypatch.setattr(api.ingestion, "_run_local_ingest_worker", fake_worker)
     with api.common.LOCAL_INGEST_LOCK:
@@ -1785,6 +1765,7 @@ def test_local_retry_preserves_defaults_and_skip_similarity(monkeypatch, tmp_pat
     assert calls[0][0] == ["failed-a.jpg"]
     assert calls[0][1] == {"artist": "Retry Artist", "platform": "Local", "source_url": ""}
     assert calls[0][2] is True
+    assert calls[0][4] is not None
 
 
 def test_local_worker_reports_wd_tagging_status_for_started_paths(monkeypatch, tmp_path):
@@ -1792,7 +1773,8 @@ def test_local_worker_reports_wd_tagging_status_for_started_paths(monkeypatch, t
     source = tmp_path / "drop_ok.jpg"
     source.write_bytes(b"fake image")
 
-    def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, **kwargs):
+    def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, ctx=None):
+        assert ctx is not None
         if delete_source:
             Path(path).unlink()
         return True, "Success: drop_ok.jpg -> item.jpg", {
@@ -1820,10 +1802,31 @@ def test_local_worker_reports_wd_tagging_status_for_started_paths(monkeypatch, t
 
 def test_local_ingest_expansion_is_streaming_not_sorted(monkeypatch, tmp_path):
     (api,) = fresh_backend(monkeypatch, tmp_path, "api")
-    source = inspect.getsource(api.ingestion._iter_local_ingest_paths)
+    directory = tmp_path / "drop"
+    directory.mkdir()
+    first = directory / "first.jpg"
+    second = directory / "second.jpg"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    visited = []
 
-    assert "sorted(" not in source
-    assert ".rglob(\"*\")" in source
+    def child_paths():
+        for child in (first, second):
+            visited.append(child)
+            yield child
+
+    monkeypatch.setattr(
+        api.ingestion,
+        "get_app_settings",
+        lambda: {"ingestion": {"accepted_media": {"extensions": ["jpg"]}}},
+    )
+    monkeypatch.setattr(Path, "rglob", lambda _path, _pattern: child_paths())
+
+    paths = iter(api.ingestion._iter_local_ingest_paths([str(directory)]))
+    assert next(paths) == first.resolve()
+    assert visited == [first]
+    assert next(paths) == second.resolve()
+    assert visited == [first, second]
 
 
 def test_local_drop_intake_accepts_supported_file_and_directory(monkeypatch, tmp_path):
@@ -2072,14 +2075,6 @@ def test_patch_rolls_back_db_when_markdown_write_fails(monkeypatch, tmp_path):
     conn.close()
 
 
-def test_processor_uses_atomic_markdown_writes(monkeypatch, tmp_path):
-    (processor,) = fresh_backend(monkeypatch, tmp_path, "processor")
-
-    source = inspect.getsource(processor.process_file)
-    assert "atomic_write_text(md_path, md_content)" in source
-    assert "with open(md_path" not in source
-
-
 def test_processor_skips_file_already_pending_review(monkeypatch, tmp_path):
     utils, processor = fresh_backend(monkeypatch, tmp_path, "utils", "processor")
     source = tmp_path / "pending.webp"
@@ -2199,6 +2194,12 @@ def test_ingest_seeds_markdown_artist_from_metadata_and_reindexes(monkeypatch, t
     item_hash = "5" * 64
     source = tmp_path / "source.jpg"
     source.write_bytes(b"fake image")
+    atomic_writes = []
+    atomic_write_text = processor.atomic_write_text
+
+    def record_atomic_write(path, text, encoding="utf-8"):
+        atomic_writes.append((Path(path), text))
+        return atomic_write_text(path, text, encoding)
 
     class TagResult:
         status = "ok"
@@ -2210,6 +2211,7 @@ def test_ingest_seeds_markdown_artist_from_metadata_and_reindexes(monkeypatch, t
     monkeypatch.setattr(processor, "calculate_tiles", lambda path: [])
     monkeypatch.setattr(processor, "tag_media", lambda *args, **kwargs: TagResult())
     monkeypatch.setattr(processor, "_pending_review_match", lambda file_hash: None)
+    monkeypatch.setattr(processor, "atomic_write_text", record_atomic_write)
 
     ok, _, idx_data = processor.process_file(
         source,
@@ -2220,14 +2222,17 @@ def test_ingest_seeds_markdown_artist_from_metadata_and_reindexes(monkeypatch, t
 
     conn = sqlite_operator.init_database()
     row = conn.execute("SELECT source_artist, storage_id FROM items WHERE hash = ?", (item_hash,)).fetchone()
-    note_data = frontmatter_from_markdown(utils.note_path_for(item_hash, row[1]).read_text(encoding="utf-8"))
+    note_path = utils.note_path_for(item_hash, row[1])
+    note_content = note_path.read_text(encoding="utf-8")
+    note_data = frontmatter_from_markdown(note_content)
 
     assert ok
     assert idx_data["file_hash"] == item_hash
     assert row[0] == "Ingest Artist"
     assert len(row[1]) == 12
     assert utils.storage_asset_path_for(item_hash, row[1], ".jpg", "image/jpeg").exists()
-    assert utils.note_path_for(item_hash, row[1]).name == f"{row[1]}.md"
+    assert note_path.name == f"{row[1]}.md"
+    assert (note_path, note_content) in atomic_writes
     assert note_data["artist"] == "Ingest Artist"
     conn.close()
 
@@ -2423,7 +2428,9 @@ def test_topic_normalize_backup_uses_workspace_root(monkeypatch, tmp_path):
 
 
 def test_review_replace_preserves_old_sqlite_identity_and_manual_indexed_metadata(monkeypatch, tmp_path):
-    utils, sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api")
+    utils, sqlite_operator, md_generator, api = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "md_generator", "api"
+    )
     old_hash = "3" * 64
     new_hash = "4" * 64
     conn = insert_mock_item(sqlite_operator, old_hash, artist="Old DB Artist", date_added="2026-01-01 00:00:00")
@@ -2439,10 +2446,21 @@ def test_review_replace_preserves_old_sqlite_identity_and_manual_indexed_metadat
     review_file.write_bytes(b"replacement")
     review_file.with_suffix(".jpg.json").write_text(json.dumps({"best_match": old_hash, "metadata": {"artist": "New Artist"}}), encoding="utf-8")
 
-    def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, sync_index=True, **kwargs):
+    def fake_process_file(
+        path,
+        config,
+        metadata=None,
+        delete_source=False,
+        skip_similarity=False,
+        sync_index=True,
+        ctx=None,
+        allow_pending_review=False,
+    ):
+        assert ctx is not None
+        assert allow_pending_review is True
         conn = insert_mock_item(sqlite_operator, new_hash, artist="New Artist", date_added="2026-02-02 00:00:00")
         new_storage_id = storage_id_for(conn, new_hash)
-        md = api.common.generate_markdown(conn, new_hash)
+        md = md_generator.generate_markdown(conn, new_hash)
         note_path = utils.note_path_for(new_hash, new_storage_id)
         note_path.parent.mkdir(parents=True, exist_ok=True)
         utils.atomic_write_text(note_path, md)
@@ -2451,8 +2469,12 @@ def test_review_replace_preserves_old_sqlite_identity_and_manual_indexed_metadat
             path.unlink()
         return True, "ok", {"file_hash": new_hash}
 
+    def fake_delete_item(target_hash, ctx=None):
+        assert ctx is not None
+        return {"hash": target_hash, "status": "deleted", "cleanup_errors": []}
+
     monkeypatch.setattr(api.review, "process_file", fake_process_file)
-    monkeypatch.setattr(api.review, "_delete_item_after_replacement", lambda target_hash, **kwargs: {"hash": target_hash, "status": "deleted", "cleanup_errors": []})
+    monkeypatch.setattr(api.review, "_delete_item_after_replacement", fake_delete_item)
 
     result = api.review._review_action_sync("replacement.jpg", "replace")
     conn = sqlite_operator.init_database()
@@ -2468,8 +2490,8 @@ def test_review_replace_preserves_old_sqlite_identity_and_manual_indexed_metadat
 
 
 def test_review_multi_match_and_safe_specific_replace(monkeypatch, tmp_path):
-    utils, sqlite_operator, api, processor, api_review = fresh_backend(
-        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api", "processor", "api.review"
+    utils, sqlite_operator, md_generator, api, processor, api_review = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "md_generator", "api", "processor", "api.review"
     )
 
     # 1. Test processor.find_visual_duplicate with return_all=True
@@ -2510,10 +2532,20 @@ def test_review_multi_match_and_safe_specific_replace(monkeypatch, tmp_path):
     assert matches[1]["artist"] == "Artist B"
 
     # 3. Test safe specific replacement action
-    def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, **kwargs):
+    def fake_process_file(
+        path,
+        config,
+        metadata=None,
+        delete_source=False,
+        skip_similarity=False,
+        ctx=None,
+        allow_pending_review=False,
+    ):
+        assert ctx is not None
+        assert allow_pending_review is True
         conn = insert_mock_item(sqlite_operator, "new-hash", artist="Staged Artist")
         new_storage_id = storage_id_for(conn, "new-hash")
-        md = api.common.generate_markdown(conn, "new-hash")
+        md = md_generator.generate_markdown(conn, "new-hash")
         note_path = utils.note_path_for("new-hash", new_storage_id)
         note_path.parent.mkdir(parents=True, exist_ok=True)
         utils.atomic_write_text(note_path, md)
@@ -2523,7 +2555,8 @@ def test_review_multi_match_and_safe_specific_replace(monkeypatch, tmp_path):
         return True, "ok", {"file_hash": "new-hash"}
 
     deleted_targets = []
-    def fake_delete_item(target_hash, **kwargs):
+    def fake_delete_item(target_hash, ctx=None):
+        assert ctx is not None
         deleted_targets.append(target_hash)
         return {"hash": target_hash, "status": "deleted", "cleanup_errors": []}
 
@@ -3278,7 +3311,7 @@ def test_stream_logs_tail_then_heartbeat_and_truncate_recovery(monkeypatch, tmp_
     monkeypatch.setattr(api.logs.asyncio, "sleep", fake_sleep)
 
     async def _run():
-        response = await api.logs.stream_logs("system.jsonl")
+        response = await api.logs.stream_logs("system.jsonl", source="active")
         gen = response.body_iterator
         first = await gen.__anext__()
         second = await gen.__anext__()
@@ -3647,7 +3680,17 @@ def test_review_replace_warns_when_old_target_cleanup_incomplete(monkeypatch, tm
     review_file.write_bytes(b"replacement")
     review_file.with_suffix(".jpg.json").write_text(json.dumps({"best_match": old_hash}), encoding="utf-8")
 
-    def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, **kwargs):
+    def fake_process_file(
+        path,
+        config,
+        metadata=None,
+        delete_source=False,
+        skip_similarity=False,
+        ctx=None,
+        allow_pending_review=False,
+    ):
+        assert ctx is not None
+        assert allow_pending_review is True
         conn = insert_mock_item(sqlite_operator, new_hash)
         new_storage_id = storage_id_for(conn, new_hash)
         note_path = utils.note_path_for(new_hash, new_storage_id)
@@ -3708,19 +3751,20 @@ def test_successful_delete_does_not_leave_vault_health_orphans(monkeypatch, tmp_
 
 @pytest.mark.parametrize("delete_mode", ["normal", "replacement"])
 def test_delete_stages_all_storage_owned_files_across_shards(monkeypatch, tmp_path, delete_mode):
-    utils, sqlite_operator, api_library, thumbnails = fresh_backend(
+    utils, sqlite_operator, api_library, thumbnails, runtime_context = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "api.library",
         "thumbnails",
+        "runtime_context",
     )
     item_hash = "5b" * 32
     conn = insert_mock_item(sqlite_operator, item_hash)
     storage_id = storage_id_for(conn, item_hash)
     conn.close()
-    vault = api_library.get_runtime_context().active_vault
+    vault = runtime_context.get_runtime_context().active_vault
     paths = [
         utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id),
         utils.note_path_for(item_hash, storage_id),
@@ -3751,19 +3795,20 @@ def test_delete_stages_all_storage_owned_files_across_shards(monkeypatch, tmp_pa
 
 
 def test_locked_wrong_shard_file_aborts_delete_and_restores_staged_files(monkeypatch, tmp_path):
-    utils, sqlite_operator, api_library = fresh_backend(
+    utils, sqlite_operator, api_library, runtime_context = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "api.library",
+        "runtime_context",
     )
     item_hash = "5c" * 32
     conn = insert_mock_item(sqlite_operator, item_hash)
     storage_id = storage_id_for(conn, item_hash)
     conn.close()
     canonical = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
-    stale = api_library.get_runtime_context().active_vault.assets_dir / "ff" / f"{storage_id}.png"
+    stale = runtime_context.get_runtime_context().active_vault.assets_dir / "ff" / f"{storage_id}.png"
     for path in (canonical, stale):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"asset")
@@ -4647,13 +4692,14 @@ def test_artist_api_rejects_duplicate_names_and_aliases(monkeypatch, tmp_path):
 
 
 def test_artist_merge_absorbs_sources_and_rewrites_items(monkeypatch, tmp_path):
-    utils, sqlite_operator, artists, workspace_db, api = fresh_backend(
+    utils, sqlite_operator, artists, workspace_db, md_generator, api = fresh_backend(
         monkeypatch,
         tmp_path,
         "utils",
         "db.sqlite_operator",
         "artists",
         "workspace_db",
+        "md_generator",
         "api",
     )
     target_hash = "68" * 32
@@ -4667,7 +4713,7 @@ def test_artist_merge_absorbs_sources_and_rewrites_items(monkeypatch, tmp_path):
         (alias_hash, "old nix"),
     ]:
         conn = insert_mock_item(sqlite_operator, item_hash, artist=artist_name)
-        md_content = api.common.generate_markdown(conn, item_hash)
+        md_content = md_generator.generate_markdown(conn, item_hash)
         row = conn.execute("SELECT storage_id FROM items WHERE hash = ?", (item_hash,)).fetchone()
         utils.atomic_write_text(utils.note_path_for(item_hash, row[0]), md_content)
         conn.close()
@@ -5290,7 +5336,7 @@ def test_thumbnail_api_returns_503_when_generation_is_busy(monkeypatch, tmp_path
     conn.close()
 
     def busy(*args, **kwargs):
-        raise api.common.ThumbnailBusyError("busy")
+        raise api.library.ThumbnailBusyError("busy")
 
     monkeypatch.setattr(api.library, "get_or_generate_thumbnail", busy)
 

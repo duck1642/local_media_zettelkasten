@@ -2,19 +2,17 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 
+from app_paths import get_app_paths
+from config_repository import bootstrap_data_home
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-from db.sqlite_operator import init_database
-from db.search_manager import search_manager
 from logger import log_system, reconfigure_logging, shutdown_logging
-from metadata_index import start_metadata_repair_worker, start_metadata_watchdog, stop_metadata_watchdog
+from metadata_index import stop_metadata_watchdog
 from runtime_activation import activate_runtime_context
 from runtime_context import RuntimeNotLoadedError, build_runtime_context, has_runtime_context
-from app_paths import get_app_paths
-from config_repository import bootstrap_data_home
 
+from api import app_settings, capture, ingestion, library, logs, review, runtime
 from api.common import (
     ALLOWED_ORIGINS,
     MUTATING_METHODS,
@@ -27,7 +25,6 @@ from api.common import (
     configure_terminal_logging,
     restore_terminal_logging,
 )
-from api import app_settings, capture, ingestion, library, logs, review, runtime
 
 # These paths must work before workspace/vault runtime exists. Vault/data
 # routes stay blocked here and use api.guards for route-specific validation.
@@ -82,33 +79,6 @@ async def startup_auth_scan():
 
 async def startup_env_workspace():
     await asyncio.to_thread(_load_env_workspace_if_requested)
-
-
-async def startup_metadata_index():
-    if not has_runtime_context():
-        return
-    def start_services():
-        try:
-            start_metadata_watchdog()
-        except Exception as exc:
-            log_system("WARNING", "Metadata watchdog startup failed", error=str(exc))
-        try:
-            start_metadata_repair_worker(full=False)
-        except Exception as exc:
-            log_system("WARNING", "Metadata index repair startup failed", error=str(exc))
-    await asyncio.to_thread(start_services)
-
-
-async def startup_search_index():
-    if not has_runtime_context():
-        return
-    def hydrate_search_index():
-        conn = init_database()
-        try:
-            search_manager.hydrate(conn)
-        finally:
-            conn.close()
-    await asyncio.to_thread(hydrate_search_index)
 
 
 # async fonksiyon await noktasında beklerken event loop başka işleri sürdürebilir;

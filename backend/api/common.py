@@ -1,81 +1,45 @@
-import os
-import sys
 import json
-import sqlite3
-import base64
 import mimetypes
-import asyncio
-import inspect
-import time
-import traceback
+import os
 import secrets
+import sys
 import threading
-import copy
-import shutil
-import yaml
-from collections import Counter
+import time
 from pathlib import Path
-from fastapi import HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
 
-from db.sqlite_operator import connect_database, init_database, normalize_source_url
-from db.search_manager import search_manager
-from utils import (
-    get_app_settings, note_path_for,
-    asset_path_for, calculate_file_hash, asset_url_for, wd_tag_cache_path_for
-)
-from runtime_context import RuntimeNotLoadedError, WorkspaceContext, get_runtime_context
-from media_lifecycle import discover_owned_paths, storage_lifecycle_lock
-from processor import process_file
-from logger import log_auth, log_ingest_audit, log_ingest_local, log_review, log_svelte, log_system, log_dirs, startup_log_dirs
-from md_generator import MANUAL_FRONTMATTER_FIELDS, load_note_frontmatter, load_note_topics, load_note_wd_tags, generate_markdown, normalize_topic_list
-from metadata_index import (
-    ensure_metadata_schema,
-    item_facet_values,
-    item_core_facet_values,
-    indexed_item_metadata,
-    metadata_facets,
-    metadata_index_ready,
-    metadata_index_status,
-    metadata_repair_running,
-    refresh_metadata_index_counters,
-    refresh_metadata_facet_counts_for_values,
-    safe_reindex_item_metadata,
-    start_metadata_repair_worker,
-    start_metadata_watchdog,
-)
-from topics import format_topics_for_note, parse_topic_value, parse_topic_values, rename_topic as rename_topic_file, slugify_topic_label
-from tagging import load_tag_cache, tag_media
-from thumbnails import ThumbnailBusyError, get_or_generate_thumbnail, thumbnail_path_for, video_thumbnail_path_for
-from utils import (
-    atomic_write_text, get_cookie_auth_status,
-    get_pixiv_refresh_token, utc_now, utc_now_str
-)
-from ingest_control import local_stop_event, online_stop_event
 from artists import (
-    add_artist_alias,
-    add_artist_link,
-    delete_artist_alias,
-    delete_artist_link,
-    get_artist_detail,
-    list_artists,
-    merge_artists,
-    normalize_artist_name,
-    preview_artist_merge,
     resolve_artist_name,
-    update_artist,
 )
-from platforms import list_platforms, resolve_platform_label
-from workspace_db import connect_workspace_database, prune_unused_workspace_metadata, rebuild_workspace_metadata, upsert_wd_dictionary_tags
+from db.sqlite_operator import connect_database, init_database, normalize_source_url
+from fastapi import HTTPException, Request
+from fastapi.responses import FileResponse
+from ingest_control import local_stop_event
+from logger import log_auth, log_dirs, startup_log_dirs
+from md_generator import MANUAL_FRONTMATTER_FIELDS, generate_markdown, load_note_frontmatter
+from media_lifecycle import discover_owned_paths, storage_lifecycle_lock
+from metadata_index import (
+    safe_reindex_item_metadata,
+)
+from platforms import resolve_platform_label
 from review_cache import (
     mark_review_cache_dirty,
     remove_review_cache_entry,
-    replace_review_cache_entries,
-    review_counts,
     upsert_review_cache_entry,
 )
+from runtime_context import RuntimeNotLoadedError, WorkspaceContext, get_runtime_context
+from thumbnails import thumbnail_path_for, video_thumbnail_path_for
+from utils import (
+    asset_path_for,
+    atomic_write_text,
+    calculate_file_hash,
+    get_cookie_auth_status,
+    get_pixiv_refresh_token,
+    note_path_for,
+    utc_now_str,
+    wd_tag_cache_path_for,
+)
+from workspace_db import connect_workspace_database
+
 
 class TerminalLogger:
     def __init__(self, filename, original_stream):
@@ -359,8 +323,6 @@ def _require_api_key(request: Request):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 def _log_dirs_for_source(source: str = "active") -> tuple[Path, Path]:
-    if hasattr(source, "default"):
-        source = source.default
     clean = str(source or "active").strip().lower()
     if clean == "startup":
         return startup_log_dirs()
@@ -377,10 +339,6 @@ def _log_dirs_for_source(source: str = "active") -> tuple[Path, Path]:
 
 
 def _log_file_for(filename: str, source: str = "active") -> Path:
-    if hasattr(filename, "default"):
-        filename = filename.default
-    if hasattr(source, "default"):
-        source = source.default
     source_name = str(source or "active").strip().lower()
     if source_name == "console":
         filename = "console.log"
@@ -728,8 +686,4 @@ def _log_file_signature(path: Path) -> tuple[int, int, int] | None:
         return int(stat.st_dev), int(stat.st_ino), int(stat.st_ctime_ns)
     except OSError:
         return None
-
-# Bu liste, `from api.common import *` sırasında route dosyalarına aktarılacak adları belirler.
-# Yıldızlı import bağımlılıkları gizler; mümkün olduğunda açık import daha anlaşılırdır.
-__all__ = [name for name in globals() if not name.startswith("__")]
 

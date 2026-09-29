@@ -1,11 +1,9 @@
 import asyncio
 
-from fastapi import APIRouter, Header, HTTPException, Response
-
 from app_paths import get_app_paths
 from config_repository import ConfigReadError, SettingsConflictError, SettingsRepository
 from config_schema import AppSettings
-
+from fastapi import APIRouter, Header, HTTPException, Response
 
 router = APIRouter()
 

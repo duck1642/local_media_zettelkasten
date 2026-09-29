@@ -1,11 +1,34 @@
-from fastapi import APIRouter, Depends
+import asyncio
+import secrets
+import shutil
+import threading
+import traceback
+from collections import Counter
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from api.guards import require_usable_vault_context
 
-from api.common import *
-from artists import ensure_artist_schema
-from platforms import ensure_platform_schema
-from platforms import normalize_platform_key
+from artists import ensure_artist_schema, normalize_artist_name, resolve_artist_name
+from fastapi import APIRouter, Depends, HTTPException
+from ingest_control import online_stop_event
+from logger import log_ingest_audit, log_ingest_local, log_system
+from metadata_index import metadata_repair_running
+from platforms import ensure_platform_schema, normalize_platform_key, resolve_platform_label
+from processor import process_file
+from pydantic import BaseModel
+from runtime_context import WorkspaceContext, get_runtime_context
+from utils import get_app_settings, utc_now, utc_now_str
+from workspace_db import connect_workspace_database
+
+from api.common import (
+    LOCAL_RESULTS_LIMIT,
+    _local_ingest_dir,
+    _open_path_external,
+    _queue_name,
+    local_ingest_lock,
+    local_ingest_state,
+    local_ingest_stop_event,
+)
+from api.guards import require_usable_vault_context
 
 router = APIRouter(dependencies=[Depends(require_usable_vault_context)])
 
@@ -19,7 +42,19 @@ class QueueAppendRequest(BaseModel):
     platform: str | None = None
 
 
-from queue_service import read_queue, write_queue, queue_counts, INGESTION_LOCK, run_queue, clear_failed, move_failed_urls, parse_queue_preview, queue_path, append_queue_block
+from queue_service import (
+    INGESTION_LOCK,
+    append_queue_block,
+    clear_failed,
+    move_failed_urls,
+    parse_queue_preview,
+    queue_counts,
+    queue_path,
+    read_queue,
+    run_queue,
+    write_queue,
+)
+
 
 @router.get("/api/queue/{queue_name}")
 async def get_queue(queue_name: str):
@@ -419,13 +454,6 @@ def _snapshot_local_ingest_state(ctx: WorkspaceContext | None = None) -> dict:
             "stop_requested": bool(state.get("stop_requested")),
         }
 
-def _set_local_ingest_state(**kwargs):
-    with local_ingest_lock():
-        state = local_ingest_state()
-        for key, value in kwargs.items():
-            state[key] = value
-
-
 def runtime_switch_preflight(ctx: WorkspaceContext | None = None) -> dict:
     ctx = ctx or get_runtime_context()
     blockers = []
@@ -442,18 +470,16 @@ def _local_run_id() -> str:
     return f"{utc_now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"
 
 
-def _get_app_settings_for_ctx(ctx: WorkspaceContext | None = None) -> dict:
-    return get_app_settings()
-
-
 def _submit_local_ingest_worker(loop, raw_paths: list[str], defaults: dict, skip_similarity: bool, run_id: str, ctx: WorkspaceContext):
-    def run_worker():
-        params = inspect.signature(_run_local_ingest_worker).parameters
-        if "ctx" in params:
-            return _run_local_ingest_worker(raw_paths, defaults, skip_similarity, run_id, ctx=ctx)
-        return _run_local_ingest_worker(raw_paths, defaults, skip_similarity, run_id)
-
-    return loop.run_in_executor(None, run_worker)
+    return loop.run_in_executor(
+        None,
+        _run_local_ingest_worker,
+        raw_paths,
+        defaults,
+        skip_similarity,
+        run_id,
+        ctx,
+    )
 
 def _safe_staged_filename(index: int, source_path: Path) -> str:
     invalid = '<>:"/\\|?*'
@@ -514,7 +540,7 @@ def _cleanup_local_run_dir(run_dir: Path):
 
 def _run_local_ingest_worker(raw_paths: list[str], defaults: dict, skip_similarity: bool, run_id: str, ctx: WorkspaceContext | None = None):
     ctx = ctx or get_runtime_context()
-    cfg = _get_app_settings_for_ctx(ctx)
+    cfg = get_app_settings()
     run_dir = ctx.active_vault.local_ingest_dir / run_id
     lock = local_ingest_lock(ctx)
     state = local_ingest_state(ctx)
@@ -573,11 +599,14 @@ def _run_local_ingest_worker(raw_paths: list[str], defaults: dict, skip_similari
             with lock:
                 state["phase"] = "running"
             try:
-                import inspect
-                p_kwargs = {"metadata": metadata, "delete_source": True, "skip_similarity": skip_similarity}
-                if "ctx" in inspect.signature(process_file).parameters:
-                    p_kwargs["ctx"] = ctx
-                ok, message, index_data = process_file(staged_path, cfg, **p_kwargs)
+                ok, message, index_data = process_file(
+                    staged_path,
+                    cfg,
+                    metadata=metadata,
+                    delete_source=True,
+                    skip_similarity=skip_similarity,
+                    ctx=ctx,
+                )
                 tag_status = str((index_data or {}).get("tagging_status") or "").strip()
                 tag_count = int((index_data or {}).get("tagging_tag_count") or 0)
                 tag_error = str((index_data or {}).get("tagging_error") or "").strip()
@@ -752,7 +781,3 @@ async def local_ingest_retry_failed():
     _prepare_local_ingest_run(run_id, defaults, skip_similarity, len(failed_paths), ctx=ctx)
     _submit_local_ingest_worker(asyncio.get_running_loop(), failed_paths, defaults, skip_similarity, run_id, ctx)
     return {"status": "success", "run_id": run_id, "phase": "scanning", "queued": len(failed_paths)}
-
-
-__all__ = [name for name in globals() if not name.startswith("__")]
-

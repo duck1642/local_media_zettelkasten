@@ -1,11 +1,40 @@
-from fastapi import APIRouter, Depends
-from api.guards import require_usable_vault_context
+import asyncio
+from pathlib import Path
 
-from api.common import *
+from db.sqlite_operator import connect_database
+from fastapi import APIRouter, Depends, HTTPException
+from logger import log_review, log_system
+from processor import process_file
+from review_cache import replace_review_cache_entries, review_counts
+from runtime_context import get_runtime_context
+from utils import asset_url_for, get_app_settings
+
+from api.common import (
+    REVIEW_RESOLVED_STATES,
+    REVIEW_VISIBLE_STATES,
+    _apply_manual_frontmatter_to_item,
+    _ensure_review_hash,
+    _ensure_review_sidecar_defaults,
+    _guess_review_mime_type,
+    _is_cleanup_review_state,
+    _manual_frontmatter_for_hash,
+    _normalize_review_state,
+    _read_review_sidecar,
+    _review_cleanup_path,
+    _review_dir,
+    _review_display_name,
+    _review_failure_status,
+    _review_path,
+    _review_section_for_state,
+    _review_sidecar_path,
+    _set_review_state,
+    _sqlite_identity_for_hash,
+    _write_review_sidecar,
+)
+from api.guards import require_usable_vault_context
 from api.library import _delete_item_after_replacement
 
 router = APIRouter(dependencies=[Depends(require_usable_vault_context)])
-import asyncio
 _review_locks: dict[str, asyncio.Lock] = {}
 
 def _get_review_lock(resource_key: str) -> asyncio.Lock:
@@ -82,11 +111,6 @@ def _resolve_review_entries() -> list[dict]:
                 log_system("WARNING", "Failed to persist review sidecar reconciliation", filename=entry["path"].name, error=str(exc))
     replace_review_cache_entries(entries)
     return entries
-
-def _is_pending_review_state(state: str) -> bool:
-    if not state:
-        return True
-    return _normalize_review_state(state) in REVIEW_PENDING_STATES
 
 def _get_review_count_sync(include_resolved: bool = False):
     return review_counts(include_resolved)
@@ -244,20 +268,14 @@ def _review_action_sync(filename: str, action: str, target_hash: str = None):
         replacement_identity_fields = _sqlite_identity_for_hash(target_hash, ctx=ctx)
 
     try:
-        import inspect
-        p_kwargs = {
-            "metadata": metadata,
-            "delete_source": True,
-            "skip_similarity": True,
-        }
-        if "ctx" in inspect.signature(process_file).parameters:
-            p_kwargs["ctx"] = ctx
-        if "allow_pending_review" in inspect.signature(process_file).parameters:
-            p_kwargs["allow_pending_review"] = True
         ok, process_message, idx_data = process_file(
             file_path,
             cfg,
-            **p_kwargs
+            metadata=metadata,
+            delete_source=True,
+            skip_similarity=True,
+            ctx=ctx,
+            allow_pending_review=True,
         )
     except Exception as exc:
         log_review("ERROR", "Review action failed", action=action, filename=filename, display_name=display_name, target_hash=target_hash, error=str(exc))
@@ -304,11 +322,7 @@ def _review_action_sync(filename: str, action: str, target_hash: str = None):
         return {"status": "warning", "action": action, "message": message, "error": preserve_error}
 
     if action == "replace":
-        import inspect
-        del_kwargs = {}
-        if "ctx" in inspect.signature(_delete_item_after_replacement).parameters:
-            del_kwargs["ctx"] = ctx
-        replace_result = _delete_item_after_replacement(target_hash, **del_kwargs)
+        replace_result = _delete_item_after_replacement(target_hash, ctx=ctx)
         replace_cleanup_errors = replace_result.get("cleanup_errors") or []
         if replace_result["status"] != "deleted":
             error_text = "; ".join(str(item.get("error", "")) for item in replace_result.get("cleanup_errors", []) if item.get("error"))
@@ -403,5 +417,3 @@ def _cleanup_review_resolved_sync():
         "cleaned_orphans": cleaned_orphans,
         "failed_orphans": failed_orphans,
     }
-
-__all__ = [name for name in globals() if not name.startswith("__")]

@@ -1,8 +1,47 @@
-from fastapi import APIRouter, Depends
-from fastapi.responses import RedirectResponse
-from api.guards import require_usable_vault_context
+import asyncio
+import base64
+import json
+import sys
+import time
+import traceback
+from pathlib import Path
 
-from api.common import *
+from artists import (
+    add_artist_alias,
+    add_artist_link,
+    delete_artist_alias,
+    delete_artist_link,
+    get_artist_detail,
+    list_artists,
+    merge_artists,
+    normalize_artist_name,
+    preview_artist_merge,
+    resolve_artist_name,
+    update_artist,
+)
+from db.search_manager import search_manager
+from db.sqlite_operator import connect_database, init_database, normalize_source_url
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, RedirectResponse
+from logger import log_review, log_system
+from md_generator import (
+    generate_markdown,
+    load_note_topics,
+    load_note_wd_tags,
+    normalize_topic_list,
+)
+from media_lifecycle import storage_lifecycle_lock
+from metadata_index import (
+    indexed_item_metadata,
+    item_core_facet_values,
+    item_facet_values,
+    metadata_facets,
+    metadata_index_ready,
+    refresh_metadata_facet_counts_for_values,
+    refresh_metadata_index_counters,
+    safe_reindex_item_metadata,
+    start_metadata_repair_worker,
+)
 from metadata_maintenance import (
     delete_topic_across_workspace,
     delete_wd_tag_across_workspace,
@@ -11,7 +50,17 @@ from metadata_maintenance import (
     rename_wd_tag_across_workspace,
     rewrite_metadata_notes_for_hashes,
 )
+from platforms import list_platforms, resolve_platform_label
+from pydantic import BaseModel
+from runtime_context import WorkspaceContext
+from tagging import load_tag_cache, tag_media
+from thumbnails import ThumbnailBusyError, get_or_generate_thumbnail
 from topics import ensure_topic_file, slugify_topic_label
+from utils import asset_path_for, asset_url_for, atomic_write_text, get_app_settings, note_path_for
+from workspace_db import connect_workspace_database, upsert_wd_dictionary_tags
+
+from api.common import _item_file_paths, _open_path_external, _review_dir, _topics_dir
+from api.guards import require_usable_vault_context
 
 router = APIRouter(dependencies=[Depends(require_usable_vault_context)])
 
@@ -348,24 +397,6 @@ def _sort_facets(items, needle, limit):
     )
     return filtered[:limit]
 
-def _count_python_facets(rows, value_loader, needle, limit):
-    counts = Counter()
-    display_values = {}
-    for row in rows:
-        seen = set()
-        for value in value_loader(row[0]):
-            text = str(value or "").strip()
-            if not text:
-                continue
-            key = text.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            counts[key] += 1
-            display_values.setdefault(key, text)
-    items = [{"value": display_values[key], "count": count} for key, count in counts.items()]
-    return _sort_facets(items, needle, limit)
-
 def _topic_library_facets(conn, needle: str, limit: int) -> list[dict]:
     used = {
         str(item["value"]).casefold(): {"value": item["value"], "count": int(item["count"] or 0)}
@@ -645,30 +676,6 @@ def _cursor_for_item(item: dict, sort: str) -> str:
     if sort == "artist":
         payload["artist"] = str(item.get("artist") or "")
     return _encode_cursor(payload)
-
-def _item_after_cursor(item: dict, cursor: str, sort: str) -> bool:
-    if not cursor:
-        return True
-    payload = _decode_cursor(cursor)
-    cursor_date = str(payload.get("date") or "")
-    cursor_hash = str(payload.get("hash") or "")
-    item_key = (str(item.get("date_added") or ""), str(item.get("hash") or ""))
-    cursor_key = (cursor_date, cursor_hash)
-    if sort == "artist":
-        item_key = (
-            str(item.get("artist") or "").casefold(),
-            str(item.get("date_added") or ""),
-            str(item.get("hash") or ""),
-        )
-        cursor_key = (
-            str(payload.get("artist") or "").casefold(),
-            cursor_date,
-            cursor_hash,
-        )
-        return item_key > cursor_key
-    if sort == "oldest":
-        return item_key > cursor_key
-    return item_key < cursor_key
 
 def _clean_filter_values(values):
     if values is None:
@@ -1376,7 +1383,3 @@ async def trigger_tagging(item_hash: str):
     except Exception as e:
         print(f"!!! TAGGING CRASH !!!\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-__all__ = [name for name in globals() if not name.startswith("__")]
-

@@ -1,31 +1,38 @@
-from typing import Literal
-
+import asyncio
 import copy
 import os
 import shutil
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter
+from config_repository import ConfigReadError
+from db.sqlite_operator import connect_database
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-
-from api.common import *
+from logger import log_system
+from metadata_index import metadata_index_status, start_metadata_repair_worker
+from path_policy import workspace_relative_path
+from pydantic import BaseModel
+from runtime_activation import activate_runtime_context, active_vault_is_usable
 from runtime_context import (
-    RuntimeNotLoadedError,
     build_runtime_context,
     clear_runtime_context,
+    get_runtime_context,
     has_runtime_context,
     try_get_runtime_context,
 )
-from path_policy import workspace_relative_path
-from config_repository import ConfigReadError
-from runtime_activation import activate_runtime_context, active_vault_is_usable
+from workspace_db import prune_unused_workspace_metadata, rebuild_workspace_metadata
+
+from api.common import _api_key, _validate_origin, configure_terminal_logging
 from api.guards import (
-    require_workspace_context,
-    require_usable_vault_context,
     require_usable_target_vault_context,
+    require_usable_vault_context,
+    require_workspace_context,
 )
 
 router = APIRouter()
@@ -445,8 +452,8 @@ async def delete_workspace(
 
 
 def _delete_workspace_sync(workspace_id: str, mode: str = "unregister"):
-    from workspaces import WorkspaceDeletionError, delete_workspace, workspace_list
     from fastapi import HTTPException
+    from workspaces import WorkspaceDeletionError, delete_workspace, workspace_list
 
     try:
         result = delete_workspace(workspace_id, mode=mode)
@@ -514,7 +521,6 @@ def _rename_vault_sync(vault_id: str, body: dict):
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
 
 @router.post("/api/vaults/active")
 async def set_vault_active(body: dict):
@@ -688,9 +694,9 @@ def _restore_workspace_registry_snapshot(registry: dict) -> None:
     The direct repository path keeps rollback testable even when the normal save
     helper is injected to fail after a simulated commit.
     """
+    import workspaces
     from config_repository import WorkspaceRegistryRepository
     from config_schema import WorkspaceRegistry
-    import workspaces
 
     repository = WorkspaceRegistryRepository(workspaces.REGISTRY_PATH)
     value = WorkspaceRegistry.model_validate(registry)
@@ -740,7 +746,12 @@ def _restore_workspace_switch_state(
 
 
 def _load_workspace_sync(workspace_id: str):
-    from workspaces import DEFAULT_WORKSPACE_ID, load_workspace_registry, save_workspace_registry, _resolve
+    from workspaces import (
+        DEFAULT_WORKSPACE_ID,
+        _resolve,
+        load_workspace_registry,
+        save_workspace_registry,
+    )
 
     with runtime_transition_lock():
         # One shared path is used by both workspace APIs. Preflight happens while
@@ -838,7 +849,7 @@ async def relocate_workspace(body: RelocateWorkspaceRequest):
     return await asyncio.to_thread(_relocate_workspace_sync, body.workspace_id, body.new_config_path)
 
 def _relocate_workspace_sync(workspace_id: str, new_config_path: str):
-    from workspaces import load_workspace_registry, save_workspace_registry, _resolve
+    from workspaces import _resolve, load_workspace_registry, save_workspace_registry
     registry = load_workspace_registry()
     if workspace_id not in registry["workspaces"]:
         raise HTTPException(status_code=404, detail="Workspace not found")
@@ -867,9 +878,10 @@ async def relocate_vault(body: RelocateVaultRequest):
     return await asyncio.to_thread(_relocate_vault_sync, body.vault_id, body.new_vault_root)
 
 def _relocate_vault_sync(vault_id: str, new_vault_root: str):
+    from config_schema import WorkspaceConfig
     from vaults import (
-        _capture_transition_snapshot,
         _capture_filesystem_files,
+        _capture_transition_snapshot,
         _cleanup_staged_config,
         _read_config,
         _record_rollback_errors,
@@ -879,7 +891,6 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
         _write_config,
         vault_id_slug,
     )
-    from config_schema import WorkspaceConfig
     from workspaces import _resolve, load_workspace_registry, save_workspace_registry
 
     with runtime_transition_lock():
@@ -1043,7 +1054,3 @@ def _import_vault_sync(body: dict):
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
-__all__ = [name for name in globals() if not name.startswith("__")]
-
