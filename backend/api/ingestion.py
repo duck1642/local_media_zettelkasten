@@ -15,6 +15,18 @@ from metadata_index import metadata_repair_running
 from platforms import ensure_platform_schema, normalize_platform_key, resolve_platform_label
 from processor import process_file
 from pydantic import BaseModel
+from queue_service import (
+    INGESTION_LOCK,
+    append_queue_block,
+    clear_failed,
+    move_failed_urls,
+    parse_queue_preview,
+    queue_counts,
+    queue_path,
+    read_queue,
+    run_queue,
+    write_queue,
+)
 from runtime_context import WorkspaceContext, get_runtime_context
 from utils import get_app_settings, utc_now, utc_now_str
 from workspace_db import connect_workspace_database
@@ -40,20 +52,6 @@ class QueueAppendRequest(BaseModel):
     url: str
     artist: str | None = None
     platform: str | None = None
-
-
-from queue_service import (
-    INGESTION_LOCK,
-    append_queue_block,
-    clear_failed,
-    move_failed_urls,
-    parse_queue_preview,
-    queue_counts,
-    queue_path,
-    read_queue,
-    run_queue,
-    write_queue,
-)
 
 
 @router.get("/api/queue/{queue_name}")

@@ -302,7 +302,7 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
         )
         return False, f"Already pending review: {file_hash[:8]}...", None
 
-    conn = connect_database(ctx=ctx)  # connect_database()
+    conn = connect_database(ctx=ctx)
     if check_duplicate_hash(conn, file_hash):
         conn.close()
         log_system("INFO", "Skipped: Duplicate hash", hash=file_hash, file=filepath.name)

@@ -452,7 +452,6 @@ async def delete_workspace(
 
 
 def _delete_workspace_sync(workspace_id: str, mode: str = "unregister"):
-    from fastapi import HTTPException
     from workspaces import WorkspaceDeletionError, delete_workspace, workspace_list
 
     try:

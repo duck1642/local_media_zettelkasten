@@ -1,7 +1,7 @@
+import ast
 import asyncio
 import concurrent.futures
 import importlib
-import inspect
 import io
 import json
 import logging
@@ -21,7 +21,6 @@ from pathlib import Path
 import pytest
 import yaml
 from fastapi import HTTPException
-
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
@@ -2238,10 +2237,19 @@ def test_ingest_seeds_markdown_artist_from_metadata_and_reindexes(monkeypatch, t
 
 
 def test_ingest_result_reports_wd_tagging_status(monkeypatch, tmp_path):
-    utils, sqlite_operator, processor = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "processor")
+    utils, sqlite_operator, processor, runtime_context = fresh_backend(
+        monkeypatch,
+        tmp_path,
+        "utils",
+        "db.sqlite_operator",
+        "processor",
+        "runtime_context",
+    )
+    ctx = runtime_context.get_runtime_context()
     item_hash = "6" * 64
     source = tmp_path / "source.jpg"
     source.write_bytes(b"fake image")
+    thumbnail_calls = []
 
     class TagResult:
         status = "ok"
@@ -2253,23 +2261,36 @@ def test_ingest_result_reports_wd_tagging_status(monkeypatch, tmp_path):
     monkeypatch.setattr(processor, "calculate_phash", lambda path: None)
     monkeypatch.setattr(processor, "calculate_tiles", lambda path: [])
     monkeypatch.setattr(processor, "tag_media", lambda *args, **kwargs: TagResult())
-    monkeypatch.setattr(processor, "_pending_review_match", lambda file_hash: None)
+
+    def fake_ensure_thumbnail(
+        file_hash, extension, mime_type, wait=True, storage_id=None, ctx=None
+    ):
+        thumbnail_calls.append((file_hash, extension, mime_type, wait, storage_id, ctx))
+
+    monkeypatch.setattr(processor, "ensure_thumbnail", fake_ensure_thumbnail)
+    monkeypatch.setattr(processor, "_pending_review_match", lambda file_hash, ctx=None: None)
 
     ok, _, idx_data = processor.process_file(
         source,
         app_settings_config(["image/jpeg"], ["jpg"]),
         metadata={"artist": "Ingest Artist", "platform": "local", "source_url": ""},
         sync_index=False,
+        ctx=ctx,
     )
 
     conn = sqlite_operator.init_database()
-    storage_id = conn.execute("SELECT storage_id FROM items WHERE hash = ?", (item_hash,)).fetchone()[0]
+    storage_id, thumbnail_status = conn.execute(
+        "SELECT storage_id, thumbnail_status FROM items WHERE hash = ?",
+        (item_hash,),
+    ).fetchone()
     conn.close()
 
     assert ok
     assert idx_data["tagging_status"] == "ok"
     assert idx_data["tagging_tag_count"] == 1
     assert utils.note_path_for(item_hash, storage_id).exists()
+    assert thumbnail_calls == [(item_hash, ".jpg", "image/jpeg", True, storage_id, ctx)]
+    assert thumbnail_status == "ready"
 
 
 def test_config_allowed_non_media_ingest_marks_thumbnail_skipped(monkeypatch, tmp_path):
@@ -5002,13 +5023,63 @@ def test_find_visual_duplicate_stops_tile_queries_after_first_match(monkeypatch,
     assert calls == ["tile-a"]
 
 
-def test_hot_ingestion_paths_use_lightweight_db_helper(monkeypatch, tmp_path):
-    processor, external_ingestion = fresh_backend(monkeypatch, tmp_path, "processor", "external_ingestion")
+def test_hot_ingestion_paths_reuse_warm_database_schema(monkeypatch, tmp_path):
+    processor, external_ingestion, sqlite_operator = fresh_backend(
+        monkeypatch,
+        tmp_path,
+        "processor",
+        "external_ingestion",
+        "db.sqlite_operator",
+    )
+    item_hash = "d4" * 32
+    seed_conn = insert_mock_item(sqlite_operator, item_hash)
+    seed_conn.close()
 
-    assert "connect_database()" in inspect.getsource(processor.process_file)
-    assert "connect_database()" in inspect.getsource(external_ingestion.ExternalIngestor._url_complete)
-    assert "connect_database()" in inspect.getsource(external_ingestion.ExternalIngestor._instagram_complete)
-    assert "connect_database()" in inspect.getsource(external_ingestion.ExternalIngestor._rollback_batch)
+    source = tmp_path / "already-indexed.jpg"
+    source.write_bytes(b"duplicate image")
+    monkeypatch.setattr(processor, "get_mime_type", lambda _path: "image/jpeg")
+    monkeypatch.setattr(processor, "calculate_file_hash", lambda _path: item_hash)
+    monkeypatch.setattr(processor, "_pending_review_match", lambda file_hash, ctx=None: None)
+
+    ingestor = external_ingestion.ExternalIngestor(str(tmp_path / "links.txt"))
+    monkeypatch.setattr(
+        external_ingestion.search_manager,
+        "remove_indexes_batch",
+        lambda _items, ctx=None: None,
+    )
+
+    traced_sql = []
+    original_connect = sqlite_operator.sqlite3.connect
+
+    def connect_with_trace(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(traced_sql.append)
+        return conn
+
+    monkeypatch.setattr(sqlite_operator.sqlite3, "connect", connect_with_trace)
+
+    for _ in range(2):
+        ok, message, _ = processor.process_file(
+            source,
+            app_settings_config(["image/jpeg"], ["jpg"]),
+            sync_index=False,
+        )
+        assert not ok
+        assert message.startswith("Duplicate ignored:")
+        assert ingestor._url_complete("https://example.test/not-downloaded") is False
+        assert ingestor._instagram_complete("https://www.instagram.com/p/not-downloaded/") is False
+        assert ingestor._rollback_batch([]) == 0
+
+    normalized_sql = [" ".join(statement.upper().split()) for statement in traced_sql]
+    schema_preparation_sql = [
+        statement
+        for statement in normalized_sql
+        if statement.startswith(("CREATE ", "ALTER TABLE ", "PRAGMA TABLE_INFO"))
+        or "SELECT STORAGE_ID FROM ITEMS WHERE STORAGE_ID IS NOT NULL" in statement
+        or "SELECT HASH FROM ITEMS WHERE STORAGE_ID IS NULL" in statement
+        or "SELECT HASH, SOURCE_URL FROM ITEMS WHERE SOURCE_URL IS NOT NULL" in statement
+    ]
+    assert schema_preparation_sql == []
 
 
 def test_online_process_metadata_keeps_only_online_identity(monkeypatch, tmp_path):
@@ -5330,48 +5401,69 @@ def test_thumbnail_and_wd_repairs_ignore_non_media_rows(monkeypatch, tmp_path):
 
 
 def test_thumbnail_api_returns_503_when_generation_is_busy(monkeypatch, tmp_path):
-    sqlite_operator, api = fresh_backend(monkeypatch, tmp_path, "db.sqlite_operator", "api")
+    sqlite_operator, library = fresh_backend(
+        monkeypatch,
+        tmp_path,
+        "db.sqlite_operator",
+        "api.library",
+    )
     item_hash = "c" * 64
     conn = insert_mock_item(sqlite_operator, item_hash)
+    item = conn.execute(
+        "SELECT file_extension, mime_type, storage_id FROM items WHERE hash = ?",
+        (item_hash,),
+    ).fetchone()
     conn.close()
+    calls = []
 
-    def busy(*args, **kwargs):
-        raise api.library.ThumbnailBusyError("busy")
+    def busy(file_hash, extension, mime_type, storage_id=None, ctx=None):
+        calls.append((file_hash, extension, mime_type, storage_id))
+        raise library.ThumbnailBusyError("busy")
 
-    monkeypatch.setattr(api.library, "get_or_generate_thumbnail", busy)
+    monkeypatch.setattr(library, "get_or_generate_thumbnail", busy)
 
     with pytest.raises(HTTPException) as exc:
-        api.library._get_thumbnail_sync(item_hash)
+        library._get_thumbnail_sync(item_hash)
 
     assert exc.value.status_code == 503
+    assert calls == [(item_hash, *item)]
 
 
-def test_no_duplicate_thumbnail_generation_paths_outside_thumbnail_module(monkeypatch, tmp_path):
-    processor, api = fresh_backend(monkeypatch, tmp_path, "processor", "api")
+def test_thumbnail_generation_is_owned_by_thumbnail_module():
+    thumbnail_generators = {"generate_image_thumbnail", "generate_video_thumbnail"}
+    route_files = sorted((BACKEND / "api").glob("*.py"), key=lambda path: path.name)
+    source_files = [BACKEND / "processor.py", *route_files]
+    violations = []
 
-    processor_source = inspect.getsource(processor)
-    api_source = "\n".join(
-        inspect.getsource(module)
-        for module in (
-            api.app,
-            api.app_settings,
-            api.capture,
-            api.common,
-            api.guards,
-            api.ingestion,
-            api.library,
-            api.logs,
-            api.review,
-            api.runtime,
-        )
-    )
+    for source_file in source_files:
+        tree = ast.parse(source_file.read_text(encoding="utf-8"), filename=str(source_file))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in thumbnail_generators
+            ):
+                relative_path = source_file.relative_to(ROOT)
+                violations.append(
+                    f"{relative_path}:{node.lineno}: duplicate generator definition"
+                )
+            elif isinstance(node, ast.ImportFrom) and any(
+                alias.name in thumbnail_generators for alias in node.names
+            ):
+                relative_path = source_file.relative_to(ROOT)
+                violations.append(
+                    f"{relative_path}:{node.lineno}: generator imported outside thumbnails.py"
+                )
+            elif isinstance(node, ast.Call):
+                called_name = node.func.id if isinstance(node.func, ast.Name) else (
+                    node.func.attr if isinstance(node.func, ast.Attribute) else None
+                )
+                if called_name in thumbnail_generators:
+                    relative_path = source_file.relative_to(ROOT)
+                    violations.append(
+                        f"{relative_path}:{node.lineno}: direct generator call"
+                    )
 
-    assert "ensure_thumbnail(" in inspect.getsource(processor.process_file)
-    assert "get_or_generate_thumbnail(" in inspect.getsource(api.library._get_thumbnail_sync)
-    assert "generate_image_thumbnail(" not in processor_source
-    assert "generate_video_thumbnail(" not in processor_source
-    assert "generate_image_thumbnail(" not in api_source
-    assert "generate_video_thumbnail(" not in api_source
+    assert violations == []
 
 
 def test_sampled_video_extraction_uses_one_ffmpeg_subprocess(monkeypatch, tmp_path):
@@ -5611,25 +5703,65 @@ def test_search_manager_runtime_logs_route_to_system(monkeypatch, tmp_path):
 
 
 def test_local_ingest_worker_emits_local_and_audit_logs(monkeypatch, tmp_path):
-    api, = fresh_backend(monkeypatch, tmp_path, "api")
+    ingestion, runtime_context = fresh_backend(
+        monkeypatch,
+        tmp_path,
+        "api.ingestion",
+        "runtime_context",
+    )
+    ctx = runtime_context.get_runtime_context()
     source = tmp_path / "source.jpg"
     source.write_bytes(b"image")
     local_calls = []
     audit_calls = []
+    expected_ctx = ctx
 
-    def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, **kwargs):
+    def fake_process_file(
+        path,
+        config,
+        metadata=None,
+        delete_source=False,
+        skip_similarity=False,
+        ctx=None,
+    ):
         assert metadata["ingest_type"] == "local"
         assert metadata["run_id"] == "run-local"
+        assert ctx is expected_ctx
         if delete_source:
             path.unlink()
-        return True, "Success: source.jpg", {"file_hash": "abc", "phash": None, "url": "", "tiles": []}
+        return True, "Success: source.jpg", {
+            "file_hash": "abc",
+            "phash": None,
+            "url": "",
+            "tiles": [],
+        }
 
-    monkeypatch.setattr(api.ingestion, "process_file", fake_process_file)
-    monkeypatch.setattr(api.ingestion, "log_ingest_local", lambda level, message, **kwargs: local_calls.append((level, message, kwargs)))
-    monkeypatch.setattr(api.ingestion, "log_ingest_audit", lambda level, message, **kwargs: audit_calls.append((level, message, kwargs)))
+    monkeypatch.setattr(ingestion, "process_file", fake_process_file)
+    monkeypatch.setattr(
+        ingestion,
+        "log_ingest_local",
+        lambda level, message, **kwargs: local_calls.append((level, message, kwargs)),
+    )
+    monkeypatch.setattr(
+        ingestion,
+        "log_ingest_audit",
+        lambda level, message, **kwargs: audit_calls.append((level, message, kwargs)),
+    )
 
-    api.ingestion._prepare_local_ingest_run("run-local", {"artist": "A", "platform": "Local"}, False, 1)
-    api.ingestion._run_local_ingest_worker([str(source)], {"artist": "A", "platform": "Local"}, False, "run-local")
+    ingestion._prepare_local_ingest_run(
+        "run-local",
+        {"artist": "A", "platform": "Local"},
+        False,
+        1,
+        ctx=ctx,
+    )
+    ingestion._run_local_ingest_worker(
+        [str(source)],
+        {"artist": "A", "platform": "Local"},
+        False,
+        "run-local",
+        ctx=ctx,
+    )
 
     local_messages = [call[1] for call in local_calls]
     assert "Local ingest run started" in local_messages
