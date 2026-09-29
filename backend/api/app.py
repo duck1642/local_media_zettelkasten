@@ -54,6 +54,7 @@ PRE_RUNTIME_WORKSPACE_LOAD_PREFIXES = (
 )
 
 
+# Baştaki `_`, adın iç kullanım için olduğunu belirtir; Python gizliliği zorunlu kılmaz.
 def _is_pre_runtime_path(path: str) -> bool:
     pre_runtime_paths = PRE_RUNTIME_PUBLIC_PATHS | PRE_RUNTIME_LOG_PATHS | PRE_RUNTIME_WORKSPACE_PATHS
     if path in pre_runtime_paths:
@@ -110,6 +111,8 @@ async def startup_search_index():
     await asyncio.to_thread(hydrate_search_index)
 
 
+# async fonksiyon await noktasında beklerken event loop başka işleri sürdürebilir;
+# to_thread bloklayan işi ayrı iş parçacığına taşır.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await asyncio.to_thread(bootstrap_data_home, get_app_paths())

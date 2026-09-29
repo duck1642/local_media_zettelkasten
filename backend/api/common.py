@@ -729,5 +729,7 @@ def _log_file_signature(path: Path) -> tuple[int, int, int] | None:
     except OSError:
         return None
 
+# Bu liste, `from api.common import *` sırasında route dosyalarına aktarılacak adları belirler.
+# Yıldızlı import bağımlılıkları gizler; mümkün olduğunda açık import daha anlaşılırdır.
 __all__ = [name for name in globals() if not name.startswith("__")]
 
