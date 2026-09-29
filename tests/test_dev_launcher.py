@@ -44,8 +44,18 @@ def test_wait_for_api_fails_when_backend_exits():
 
 
 def test_wait_for_api_times_out(monkeypatch):
-    timestamps = iter([0.0, 31.0])
+    timestamps = iter([0.0, 0.0, 31.0])
+    requests = []
+
+    def backend_not_ready(url, timeout):
+        requests.append((url, timeout))
+        raise OSError("backend is not ready")
+
     monkeypatch.setattr(dev.time, "monotonic", lambda: next(timestamps))
+    monkeypatch.setattr(dev, "urlopen", backend_not_ready)
+    monkeypatch.setattr(dev.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(TimeoutError, match="within 30 seconds"):
         dev._wait_for_api(FakeProcess(), "expected")
+
+    assert requests == [(dev.API_HEALTH_URL, 1)]
