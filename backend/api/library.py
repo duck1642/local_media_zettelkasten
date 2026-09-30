@@ -154,9 +154,6 @@ def _get_artist_sync(artist_id: int):
         conn.close()
         workspace_conn.close()
 
-def _rewrite_metadata_notes_for_hashes(conn, item_hashes: list[str]):
-    return rewrite_metadata_notes_for_hashes(conn, item_hashes)
-
 def _public_artist_merge_payload(payload: dict) -> dict:
     public = dict(payload)
     public.pop("source_norms", None)
@@ -190,7 +187,7 @@ def _patch_artist_sync(artist_id: int, update: ArtistUpdate):
                         "UPDATE items SET source_artist = ? WHERE hash = ?",
                         [(detail["name"], item_hash) for item_hash in item_hashes],
                     )
-                    _rewrite_metadata_notes_for_hashes(conn, item_hashes)
+                    rewrite_metadata_notes_for_hashes(conn, item_hashes)
                     refresh_metadata_facet_counts_for_values(conn, {("artist", previous_norm), ("artist", current_norm)})
                     detail = get_artist_detail(workspace_conn, artist_id, item_conn=conn) or detail
             workspace_conn.commit()
@@ -235,7 +232,7 @@ def _merge_artist_sync(artist_id: int, body: ArtistMergeRequest):
         try:
             result = merge_artists(workspace_conn, artist_id, body.source_artist_ids, item_conn=conn)
             if result.get("item_hashes"):
-                _rewrite_metadata_notes_for_hashes(conn, result["item_hashes"])
+                rewrite_metadata_notes_for_hashes(conn, result["item_hashes"])
                 refresh_metadata_facet_counts_for_values(
                     conn,
                     {("artist", norm) for norm in result.get("facet_norms", [])},
@@ -381,21 +378,6 @@ def _get_search_suggestions_sync(kind: str, q: str = "", limit: int = 20):
 
     result = _get_facets_sync(kind, q, limit)
     return {"suggestions": [item["value"] for item in result["items"]], "items": result["items"]}
-
-def _sort_facets(items, needle, limit):
-    needle = needle.lower()
-    filtered = [
-        item for item in items
-        if not needle or needle in item["value"].lower()
-    ]
-    filtered.sort(
-        key=lambda item: (
-            0 if needle and item["value"].lower().startswith(needle) else 1,
-            -item["count"],
-            item["value"].lower()
-        )
-    )
-    return filtered[:limit]
 
 def _topic_library_facets(conn, needle: str, limit: int) -> list[dict]:
     used = {

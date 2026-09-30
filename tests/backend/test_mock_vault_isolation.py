@@ -1727,35 +1727,37 @@ def test_local_ingest_state_guards_and_result_cap(monkeypatch, tmp_path):
     (api,) = fresh_backend(monkeypatch, tmp_path, "api")
 
     api.ingestion._prepare_local_ingest_run("run-1", {"artist": "A"}, True)
+    state = api.common.local_ingest_state()
     with pytest.raises(HTTPException) as exc:
         api.ingestion._prepare_local_ingest_run("run-2", {}, False)
     assert exc.value.status_code == 409
 
-    with api.common.LOCAL_INGEST_LOCK:
-        api.common.LOCAL_INGEST_STATE["running"] = False
-        api.common.LOCAL_INGEST_STATE["results"] = []
+    with api.common.local_ingest_lock():
+        state["running"] = False
+        state["results"] = []
         for index in range(505):
             api.ingestion._append_local_ingest_result({"index": index})
 
-    assert len(api.common.LOCAL_INGEST_STATE["results"]) == 500
-    assert api.common.LOCAL_INGEST_STATE["results"][0]["index"] == 5
-    assert api.common.LOCAL_INGEST_STATE["last_defaults"] == {"artist": "A"}
-    assert api.common.LOCAL_INGEST_STATE["last_skip_similarity"] is True
+    assert len(state["results"]) == 500
+    assert state["results"][0]["index"] == 5
+    assert state["last_defaults"] == {"artist": "A"}
+    assert state["last_skip_similarity"] is True
 
 
 def test_local_retry_preserves_defaults_and_skip_similarity(monkeypatch, tmp_path):
     (api,) = fresh_backend(monkeypatch, tmp_path, "api")
     calls = []
+    state = api.common.local_ingest_state()
 
     def fake_worker(paths, defaults, skip_similarity, run_id, ctx):
         calls.append((paths, defaults, skip_similarity, run_id, ctx))
 
     monkeypatch.setattr(api.ingestion, "_run_local_ingest_worker", fake_worker)
-    with api.common.LOCAL_INGEST_LOCK:
-        api.common.LOCAL_INGEST_STATE["running"] = False
-        api.common.LOCAL_INGEST_STATE["failed_paths"] = ["failed-a.jpg"]
-        api.common.LOCAL_INGEST_STATE["last_defaults"] = {"artist": "Retry Artist"}
-        api.common.LOCAL_INGEST_STATE["last_skip_similarity"] = True
+    with api.common.local_ingest_lock():
+        state["running"] = False
+        state["failed_paths"] = ["failed-a.jpg"]
+        state["last_defaults"] = {"artist": "Retry Artist"}
+        state["last_skip_similarity"] = True
 
     result = asyncio.run(api.ingestion.local_ingest_retry_failed())
 
@@ -1889,16 +1891,17 @@ def test_local_drop_intake_dedupes_paths(monkeypatch, tmp_path):
 
 def test_local_drop_intake_blocks_when_local_ingest_running(monkeypatch, tmp_path):
     (api,) = fresh_backend(monkeypatch, tmp_path, "api")
-    with api.common.LOCAL_INGEST_LOCK:
-        api.common.LOCAL_INGEST_STATE["running"] = True
+    state = api.common.local_ingest_state()
+    with api.common.local_ingest_lock():
+        state["running"] = True
     try:
         payload = api.ingestion.LocalIngestDropIntakeRequest(session_id="s4", source_tab="vault", paths=["C:/tmp/a.jpg"])
         with pytest.raises(HTTPException) as exc:
             api.ingestion._local_drop_intake_sync(payload)
         assert exc.value.status_code == 409
     finally:
-        with api.common.LOCAL_INGEST_LOCK:
-            api.common.LOCAL_INGEST_STATE["running"] = False
+        with api.common.local_ingest_lock():
+            state["running"] = False
 
 
 def test_local_drop_intake_blocks_when_online_ingest_running(monkeypatch, tmp_path):
@@ -3315,7 +3318,7 @@ def test_review_state_timestamp_uses_standard_format(monkeypatch, tmp_path):
 
 def test_stream_logs_tail_then_heartbeat_and_truncate_recovery(monkeypatch, tmp_path):
     api, = fresh_backend(monkeypatch, tmp_path, "api")
-    log_file = api.common.LOG_FILES["system.jsonl"]
+    log_file = api.common._log_file_for("system.jsonl")
     log_file.parent.mkdir(parents=True, exist_ok=True)
     log_file.write_text('{"message":"tail"}\n', encoding="utf-8")
 

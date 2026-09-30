@@ -26,7 +26,7 @@ from review_cache import (
     remove_review_cache_entry,
     upsert_review_cache_entry,
 )
-from runtime_context import RuntimeNotLoadedError, WorkspaceContext, get_runtime_context
+from runtime_context import WorkspaceContext, get_runtime_context
 from thumbnails import thumbnail_path_for, video_thumbnail_path_for
 from utils import (
     asset_path_for,
@@ -137,19 +137,6 @@ LOG_FILE_NAMES = {
 }
 
 
-class _DynamicLogFiles(dict):
-    def __getitem__(self, filename):
-        return _log_file_for(filename)
-
-    def get(self, filename, default=None):
-        try:
-            return _log_file_for(filename)
-        except HTTPException:
-            return default
-
-
-LOG_FILES = _DynamicLogFiles({name: None for name in LOG_FILE_NAMES})
-
 REVIEW_RESOLVED_STATES = {
     "resolved_variant",
     "resolved_delete",
@@ -219,30 +206,6 @@ def reset_local_ingest_state(ctx: WorkspaceContext | None = None):
     local_ingest_stop_event(ctx).clear()
 
 
-class _LocalIngestStateProxy:
-    def __getitem__(self, key):
-        return local_ingest_state()[key]
-
-    def __setitem__(self, key, value):
-        local_ingest_state()[key] = value
-
-    def get(self, key, default=None):
-        return local_ingest_state().get(key, default)
-
-
-class _LocalIngestLockProxy:
-    def __enter__(self):
-        self._lock = local_ingest_lock()
-        self._lock.acquire()
-        return self._lock
-
-    def __exit__(self, _exc_type, _exc, _tb):
-        self._lock.release()
-
-
-LOCAL_INGEST_STATE = _LocalIngestStateProxy()
-LOCAL_INGEST_LOCK = _LocalIngestLockProxy()
-
 def _scan_auth_status_sync(reason: str = "manual") -> dict:
     cookie_status = get_cookie_auth_status()
     pixiv_token = get_pixiv_refresh_token()
@@ -305,12 +268,6 @@ def _api_key() -> str:
     atomic_write_text(path, value)
     return value
 
-
-def require_runtime_loaded():
-    try:
-        return get_runtime_context()
-    except RuntimeNotLoadedError as exc:
-        raise HTTPException(status_code=503, detail="Workspace not loaded") from exc
 
 def _validate_origin(origin: str | None):
     if origin and origin not in ALLOWED_ORIGINS:
