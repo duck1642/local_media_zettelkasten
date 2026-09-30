@@ -3,32 +3,30 @@ import copy
 import os
 import shutil
 import sys
-import threading
 import uuid
-from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
+import runtime_transitions
 from config_repository import ConfigReadError
 from db.sqlite_operator import connect_database
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from logger import log_system
+from logger import configure_terminal_logging, log_system
 from metadata_index import metadata_index_status, start_metadata_repair_worker
 from path_policy import workspace_relative_path
 from pydantic import BaseModel
 from runtime_activation import activate_runtime_context, active_vault_is_usable
 from runtime_context import (
     build_runtime_context,
-    clear_runtime_context,
     get_runtime_context,
     has_runtime_context,
     try_get_runtime_context,
 )
 from workspace_db import prune_unused_workspace_metadata, rebuild_workspace_metadata
 
-from api.common import _api_key, _validate_origin, configure_terminal_logging
+from api.common import _api_key, _validate_origin
 from api.guards import (
     require_usable_target_vault_context,
     require_usable_vault_context,
@@ -36,19 +34,6 @@ from api.guards import (
 )
 
 router = APIRouter()
-
-
-# Workspace loads run in worker threads, so the lock must be process-wide rather
-# than an asyncio-only lock. The lock covers preflight through commit/rollback.
-_WORKSPACE_SWITCH_LOCK = threading.Lock()
-_MISSING_ENV = object()
-
-
-@contextmanager
-def runtime_transition_lock():
-    """Serialize workspace and vault transitions in this backend process."""
-    with _WORKSPACE_SWITCH_LOCK:
-        yield
 
 
 @router.get("/api/session-key")
@@ -369,9 +354,7 @@ async def set_workspace_active(body: dict):
 def _runtime_switch_blocker():
     if not has_runtime_context():
         return None
-    from api.ingestion import runtime_switch_preflight
-
-    preflight = runtime_switch_preflight()
+    preflight = runtime_transitions.runtime_switch_preflight()
     if preflight.get("allowed"):
         return None
     return JSONResponse(
@@ -381,16 +364,13 @@ def _runtime_switch_blocker():
 
 
 def _ensure_runtime_switch_allowed():
-    if not has_runtime_context():
-        return
-    from api.ingestion import runtime_switch_preflight
-
-    preflight = runtime_switch_preflight()
-    if not preflight.get("allowed"):
+    try:
+        runtime_transitions.ensure_runtime_switch_allowed()
+    except runtime_transitions.RuntimeSwitchBlockedError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"detail": "Runtime switch blocked", "blockers": list(preflight.get("blockers") or [])},
-        )
+            detail={"detail": "Runtime switch blocked", "blockers": exc.blockers},
+        ) from exc
 
 
 def _set_workspace_active_sync(body: dict):
@@ -535,6 +515,11 @@ def _set_vault_active_sync(body: dict):
         raise HTTPException(status_code=400, detail="vault id is required")
     try:
         return set_active_vault(vault_id)
+    except runtime_transitions.RuntimeSwitchBlockedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"detail": "Runtime switch blocked", "blockers": exc.blockers},
+        ) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -687,63 +672,6 @@ async def load_workspace(workspace_id: str):
     return await asyncio.to_thread(_load_workspace_sync, workspace_id)
 
 
-def _restore_workspace_registry_snapshot(registry: dict) -> None:
-    """Restore a registry snapshot without going through the public save helper.
-
-    The direct repository path keeps rollback testable even when the normal save
-    helper is injected to fail after a simulated commit.
-    """
-    import workspaces
-    from config_repository import WorkspaceRegistryRepository
-    from config_schema import WorkspaceRegistry
-
-    repository = WorkspaceRegistryRepository(workspaces.REGISTRY_PATH)
-    value = WorkspaceRegistry.model_validate(registry)
-    if not workspaces.REGISTRY_PATH.exists():
-        repository.create(value)
-        return
-    current = repository.read()
-    repository.replace(value, expected_etag=current.etag)
-
-
-def _restore_workspace_switch_state(
-    previous_registry: dict,
-    previous_env: object,
-    previous_ctx,
-) -> list[str]:
-    """Best-effort full rollback; return errors so the caller can report them."""
-    errors: list[str] = []
-
-    try:
-        _restore_workspace_registry_snapshot(previous_registry)
-    except Exception as exc:
-        errors.append(f"registry rollback failed: {exc}")
-
-    try:
-        if previous_env is _MISSING_ENV:
-            os.environ.pop("LMZ_CONFIG_PATH", None)
-        else:
-            os.environ["LMZ_CONFIG_PATH"] = str(previous_env)
-    except Exception as exc:
-        errors.append(f"environment rollback failed: {exc}")
-
-    try:
-        if previous_ctx is None:
-            clear_runtime_context()
-            from logger import reconfigure_logging
-
-            reconfigure_logging(None)
-        else:
-            # Rollback must rehydrate all runtime services, not merely restore the
-            # pointer to the previous context.
-            activate_runtime_context(previous_ctx, hydrate=True)
-        configure_terminal_logging()
-    except Exception as exc:
-        errors.append(f"runtime-service rollback failed: {exc}")
-
-    return errors
-
-
 def _load_workspace_sync(workspace_id: str):
     from workspaces import (
         DEFAULT_WORKSPACE_ID,
@@ -752,7 +680,7 @@ def _load_workspace_sync(workspace_id: str):
         save_workspace_registry,
     )
 
-    with runtime_transition_lock():
+    with runtime_transitions.runtime_transition_lock():
         # One shared path is used by both workspace APIs. Preflight happens while
         # holding the same lock as the candidate load and commit.
         _ensure_runtime_switch_allowed()
@@ -771,7 +699,7 @@ def _load_workspace_sync(workspace_id: str):
 
         previous_registry = copy.deepcopy(registry)
         previous_ctx = try_get_runtime_context()
-        previous_env = os.environ.get("LMZ_CONFIG_PATH", _MISSING_ENV)
+        previous_env = os.environ.get("LMZ_CONFIG_PATH", runtime_transitions.MISSING_ENV)
         activation_started = False
 
         try:
@@ -818,19 +746,19 @@ def _load_workspace_sync(workspace_id: str):
                 "active_vault": active_vault.id if active_vault else None,
             }
         except ConfigReadError as exc:
-            rollback_errors = _restore_workspace_switch_state(previous_registry, previous_env, previous_ctx) if activation_started else []
+            rollback_errors = runtime_transitions.restore_workspace_switch_state(previous_registry, previous_env, previous_ctx) if activation_started else []
             detail = {"code": "unsupported_workspace_config", "message": str(exc)}
             if rollback_errors:
                 detail["rollback_errors"] = rollback_errors
             raise HTTPException(status_code=422, detail=detail) from exc
         except ValueError as exc:
-            rollback_errors = _restore_workspace_switch_state(previous_registry, previous_env, previous_ctx) if activation_started else []
+            rollback_errors = runtime_transitions.restore_workspace_switch_state(previous_registry, previous_env, previous_ctx) if activation_started else []
             detail: object = str(exc)
             if rollback_errors:
                 detail = {"message": str(exc), "rollback_errors": rollback_errors}
             raise HTTPException(status_code=400, detail=detail) from exc
         except Exception as exc:
-            rollback_errors = _restore_workspace_switch_state(previous_registry, previous_env, previous_ctx) if activation_started else []
+            rollback_errors = runtime_transitions.restore_workspace_switch_state(previous_registry, previous_env, previous_ctx) if activation_started else []
             log_system(
                 "ERROR",
                 "Failed to load workspace",
@@ -879,7 +807,7 @@ async def relocate_vault(body: RelocateVaultRequest):
 def _relocate_vault_sync(vault_id: str, new_vault_root: str):
     from config_schema import WorkspaceConfig
     from vaults import (
-        _capture_filesystem_files,
+        _capture_filesystem_paths,
         _capture_transition_snapshot,
         _cleanup_staged_config,
         _read_config,
@@ -892,13 +820,14 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
     )
     from workspaces import _resolve, load_workspace_registry, save_workspace_registry
 
-    with runtime_transition_lock():
+    with runtime_transitions.runtime_transition_lock():
         _ensure_runtime_switch_allowed()
         ctx = get_runtime_context()
         snapshot = _capture_transition_snapshot(ctx)
         staged_config: Path | None = None
         target_root: Path | None = None
-        target_files_before: set[Path] = set()
+        target_paths_before: set[Path] | None = None
+        target_mutation_started = False
         target_db_backup: Path | None = None
         try:
             config = _read_config(ctx)
@@ -919,7 +848,6 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
             candidate = copy.deepcopy(config)
             candidate["vaults"][clean_id]["root"] = stored_root
             WorkspaceConfig.model_validate(candidate)
-            target_files_before = _capture_filesystem_files(target_root)
             target_db = target_root / "db" / "lmz_main.db"
             if target_db.exists():
                 target_db_backup = target_root.parent / f".lmz-relocate-db-{uuid.uuid4().hex}.bak"
@@ -931,6 +859,10 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
             # candidate and all services are ready.
             staged_ctx = build_runtime_context(staged_config)
             candidate_ctx = replace(staged_ctx, config_path=ctx.config_path)
+            target_paths_before = _capture_filesystem_paths(target_root)
+            # Before activation, target files must be preserved if preparation fails.
+            # After this point activation may create the database and vault folders.
+            target_mutation_started = True
             activate_runtime_context(candidate_ctx, hydrate=True)
             configure_terminal_logging()
 
@@ -949,8 +881,9 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
             return {"status": "success", "vault_root": str(target_root)}
         except HTTPException as exc:
             rollback_errors = _restore_transition_snapshot(snapshot)
-            rollback_errors.extend(_remove_new_files(target_root, target_files_before) if target_root is not None else [])
-            if target_db_backup is not None and target_db_backup.exists() and target_root is not None:
+            if target_mutation_started and target_root is not None and target_paths_before is not None:
+                rollback_errors.extend(_remove_new_files(target_root, target_paths_before))
+            if target_mutation_started and target_db_backup is not None and target_db_backup.exists() and target_root is not None:
                 try:
                     shutil.copy2(target_db_backup, target_root / "db" / "lmz_main.db")
                 except OSError as restore_exc:
@@ -959,8 +892,9 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
             raise
         except Exception as exc:
             rollback_errors = _restore_transition_snapshot(snapshot)
-            rollback_errors.extend(_remove_new_files(target_root, target_files_before) if target_root is not None else [])
-            if target_db_backup is not None and target_db_backup.exists() and target_root is not None:
+            if target_mutation_started and target_root is not None and target_paths_before is not None:
+                rollback_errors.extend(_remove_new_files(target_root, target_paths_before))
+            if target_mutation_started and target_db_backup is not None and target_db_backup.exists() and target_root is not None:
                 try:
                     shutil.copy2(target_db_backup, target_root / "db" / "lmz_main.db")
                 except OSError as restore_exc:

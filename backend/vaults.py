@@ -1,5 +1,5 @@
-import hashlib
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -11,12 +11,18 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
+import runtime_transitions
 from config_repository import WorkspaceConfigRepository, _atomic_write
 from config_schema import WorkspaceConfig
 from db.sqlite_operator import allocate_storage_id, init_database
 from media_lifecycle import remove_stale_derived_files, storage_lifecycle_lock
 from path_policy import vault_root_is_inside_workspace, vault_root_is_usable
-from runtime_context import VaultContext, WorkspaceContext, build_runtime_context, get_runtime_context
+from runtime_context import (
+    VaultContext,
+    WorkspaceContext,
+    build_runtime_context,
+    get_runtime_context,
+)
 from vault_packages import (
     BACKUP_PACKAGE_TYPE,
     EXPORT_PACKAGE_TYPE,
@@ -30,10 +36,9 @@ from vault_packages import (
     package_fingerprint,
     package_operation_lock,
     snapshot_sqlite_database,
-    validate_archive_members,
     utc_package_timestamp,
+    validate_archive_members,
 )
-
 
 VAULT_LOCAL_DIRS = (
     "vault/assets",
@@ -84,37 +89,32 @@ def _write_config(config: dict, ctx: WorkspaceContext | None = None):
 
 @contextmanager
 def _vault_transition():
-    """Use A1's process-wide lock and preflight for every vault transition."""
-    from api.runtime import _ensure_runtime_switch_allowed, runtime_transition_lock
-
-    with runtime_transition_lock():
-        _ensure_runtime_switch_allowed()
+    """Share workspace-switch serialization and preflight for vault changes."""
+    with runtime_transitions.runtime_transition_lock():
+        runtime_transitions.ensure_runtime_switch_allowed()
         yield
 
 
 def _capture_transition_snapshot(ctx: WorkspaceContext) -> dict:
-    from api.runtime import _MISSING_ENV
     from workspaces import load_workspace_registry
 
     return {
         "config_path": ctx.config_path,
         "config_bytes": ctx.config_path.read_bytes(),
         "registry": copy.deepcopy(load_workspace_registry()),
-        "env": os.environ.get("LMZ_CONFIG_PATH", _MISSING_ENV),
+        "env": os.environ.get("LMZ_CONFIG_PATH", runtime_transitions.MISSING_ENV),
         "context": ctx,
     }
 
 
 def _restore_transition_snapshot(snapshot: dict) -> list[str]:
-    from api.runtime import _restore_workspace_switch_state
-
     errors: list[str] = []
     try:
         _atomic_write(snapshot["config_path"], snapshot["config_bytes"])
     except Exception as exc:
         errors.append(f"workspace config rollback failed: {exc}")
     errors.extend(
-        _restore_workspace_switch_state(
+        runtime_transitions.restore_workspace_switch_state(
             snapshot["registry"],
             snapshot["env"],
             snapshot["context"],
@@ -149,13 +149,13 @@ def _cleanup_staged_config(stage: Path | None) -> None:
     stage.with_name(f".{stage.name}.lock").unlink(missing_ok=True)
 
 
-def _capture_filesystem_files(root: Path) -> set[Path]:
+def _capture_filesystem_paths(root: Path) -> set[Path]:
     if not root.exists():
         return set()
     return {
         path.relative_to(root)
         for path in root.rglob("*")
-        if path.is_file()
+        if path.is_file() or path.is_dir()
     }
 
 
@@ -171,7 +171,7 @@ def _remove_new_files(root: Path, before: set[Path]) -> list[str]:
         except OSError as exc:
             errors.append(f"{path}: {exc}")
     for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
-        if not path.is_dir() or path == root:
+        if not path.is_dir() or path == root or path.relative_to(root) in before:
             continue
         try:
             path.rmdir()
@@ -253,15 +253,18 @@ def _ctx_for_vault(vault_id: str, ctx: WorkspaceContext | None = None) -> Worksp
     )
 
 
+def get_vault_context(vault_id: str, ctx: WorkspaceContext | None = None) -> WorkspaceContext:
+    """Resolve a configured vault without making it the active vault."""
+    return _ctx_for_vault(vault_id, ctx)
+
+
 def _safe_package_name(value: str) -> str:
     return vault_id_slug(value).replace("-", "_")
 
 
 def _package_preflight(ctx: WorkspaceContext | None = None) -> None:
     try:
-        from api.ingestion import runtime_switch_preflight
-
-        preflight = runtime_switch_preflight(_ctx(ctx))
+        preflight = runtime_transitions.runtime_switch_preflight(_ctx(ctx))
     except Exception as exc:
         raise ValueError("package operation preflight failed") from exc
     if not preflight.get("allowed"):
@@ -397,7 +400,7 @@ def set_active_vault(vault_id: str, ctx: WorkspaceContext | None = None) -> dict
             # the real config so logging and future reloads remain canonical.
             staged_ctx = build_runtime_context(staged_config)
             candidate_ctx = replace(staged_ctx, config_path=runtime.config_path)
-            from api.common import configure_terminal_logging
+            from logger import configure_terminal_logging
             from runtime_activation import activate_runtime_context
 
             activate_runtime_context(candidate_ctx, hydrate=True)
@@ -889,7 +892,7 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
         finally:
             conn.close()
         try:
-            from workspace_db import connect_workspace_database, _workspace_usage
+            from workspace_db import _workspace_usage, connect_workspace_database
             workspace_conn = connect_workspace_database(ctx)
             try:
                 dictionary_wd = {row[0] for row in workspace_conn.execute("SELECT tag_norm FROM wd_tag_dictionary").fetchall()}
@@ -1009,7 +1012,13 @@ def _repair_missing_wd_cache(conn: sqlite3.Connection, ctx: WorkspaceContext, li
     from md_generator import generate_markdown
     from metadata_index import safe_reindex_item_metadata
     from tagging.service import tag_media
-    from utils import asset_path_for, atomic_write_text, get_app_settings, note_path_for, wd_tag_cache_path_for
+    from utils import (
+        asset_path_for,
+        atomic_write_text,
+        get_app_settings,
+        note_path_for,
+        wd_tag_cache_path_for,
+    )
 
     checked = 0
     tagged = 0

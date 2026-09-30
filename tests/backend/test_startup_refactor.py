@@ -11,7 +11,6 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
 
@@ -30,6 +29,7 @@ def fresh_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             "utils",
             "runtime_context",
             "runtime_activation",
+            "runtime_transitions",
             "workspaces",
             "queue_service",
             "md_generator",
@@ -134,12 +134,14 @@ def _prepare_workspace_switch_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
 def test_direct_and_active_workspace_loads_share_preflight(monkeypatch, tmp_path):
     client, key, runtime_api, runtime_context, workspaces, ready_config = _prepare_workspace_switch_fixture(monkeypatch, tmp_path)
-    ingestion = importlib.import_module("api.ingestion")
+    runtime_transitions = importlib.import_module("runtime_transitions")
+    vaults = importlib.import_module("vaults")
+    vaults.create_vault("Delete Target")
     previous_ctx = runtime_context.get_runtime_context()
     sentinel = str(tmp_path / "override-config.yaml")
     monkeypatch.setenv("LMZ_CONFIG_PATH", sentinel)
     monkeypatch.setattr(
-        ingestion,
+        runtime_transitions,
         "runtime_switch_preflight",
         lambda *args, **kwargs: {"allowed": False, "blockers": ["test_switch_blocked"]},
     )
@@ -150,9 +152,47 @@ def test_direct_and_active_workspace_loads_share_preflight(monkeypatch, tmp_path
         json={"id": "ready"},
         headers={"X-LMZ-API-KEY": key},
     )
+    vault = client.post(
+        "/api/vaults/active",
+        json={"id": "default"},
+        headers={"X-LMZ-API-KEY": key},
+    )
+    create_vault = client.post(
+        "/api/vaults",
+        json={"name": "Blocked Vault"},
+        headers={"X-LMZ-API-KEY": key},
+    )
+    delete_vault = client.delete(
+        "/api/vaults/delete-target?confirm=true",
+        headers={"X-LMZ-API-KEY": key},
+    )
+    delete_workspace = client.delete(
+        "/api/workspaces/ready?mode=unregister",
+        headers={"X-LMZ-API-KEY": key},
+    )
 
+    nested_blocked_detail = {
+        "detail": {
+            "detail": "Runtime switch blocked",
+            "blockers": ["test_switch_blocked"],
+        }
+    }
+    flat_blocked_detail = {
+        "detail": "Runtime switch blocked",
+        "blockers": ["test_switch_blocked"],
+    }
     assert direct.status_code == 409
     assert active.status_code == 409
+    assert vault.status_code == 409
+    assert direct.json() == nested_blocked_detail
+    assert active.json() == nested_blocked_detail
+    assert vault.json() == nested_blocked_detail
+    assert create_vault.status_code == 409
+    assert create_vault.json() == vault.json()
+    assert delete_vault.status_code == 409
+    assert delete_vault.json() == nested_blocked_detail
+    assert delete_workspace.status_code == 409
+    assert delete_workspace.json() == flat_blocked_detail
     assert runtime_context.get_runtime_context() == previous_ctx
     assert workspaces.load_workspace_registry()["active_workspace"] == "default"
     assert os.environ["LMZ_CONFIG_PATH"] == sentinel
@@ -205,6 +245,7 @@ def test_registry_commit_failure_restores_registry_env_and_rehydrates_previous_s
     client, key, runtime_api, runtime_context, workspaces, ready_config = _prepare_workspace_switch_fixture(monkeypatch, tmp_path)
     original_save = workspaces.save_workspace_registry
     original_activate = runtime_api.activate_runtime_context
+    runtime_activation = importlib.import_module("runtime_activation")
     previous_ctx = runtime_context.get_runtime_context()
     sentinel = str(tmp_path / "override-config.yaml")
     calls = []
@@ -221,6 +262,7 @@ def test_registry_commit_failure_restores_registry_env_and_rehydrates_previous_s
 
     monkeypatch.setattr(workspaces, "save_workspace_registry", fail_candidate_registry_save)
     monkeypatch.setattr(runtime_api, "activate_runtime_context", record_activation)
+    monkeypatch.setattr(runtime_activation, "activate_runtime_context", record_activation)
     response = client.post("/api/workspaces/ready/load", headers={"X-LMZ-API-KEY": key})
 
     assert response.status_code == 500

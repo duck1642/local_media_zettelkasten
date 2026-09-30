@@ -1,6 +1,7 @@
 import importlib
 import sys
 from pathlib import Path
+
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -13,11 +14,9 @@ def _shutdown_loaded_runtime():
     previous_metadata_index = sys.modules.get("metadata_index")
     if previous_metadata_index is not None:
         previous_metadata_index.stop_metadata_watchdog()
-    previous_common = sys.modules.get("api.common")
-    if previous_common is not None:
-        previous_common.restore_terminal_logging()
     previous_logger = sys.modules.get("logger")
     if previous_logger is not None:
+        previous_logger.restore_terminal_logging()
         previous_logger.shutdown_logging()
 
 
@@ -41,6 +40,7 @@ def fresh_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             "utils",
             "runtime_context",
             "runtime_activation",
+            "runtime_transitions",
             "workspaces",
             "queue_service",
             "md_generator",

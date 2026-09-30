@@ -2,8 +2,6 @@ import json
 import mimetypes
 import os
 import secrets
-import sys
-import threading
 import time
 from pathlib import Path
 
@@ -13,7 +11,6 @@ from artists import (
 from db.sqlite_operator import connect_database, init_database, normalize_source_url
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
-from ingest_control import local_stop_event
 from logger import log_auth, log_dirs, startup_log_dirs
 from md_generator import MANUAL_FRONTMATTER_FIELDS, generate_markdown, load_note_frontmatter
 from media_lifecycle import discover_owned_paths, storage_lifecycle_lock
@@ -39,81 +36,6 @@ from utils import (
     wd_tag_cache_path_for,
 )
 from workspace_db import connect_workspace_database
-
-
-class TerminalLogger:
-    def __init__(self, filename, original_stream):
-        self.terminal = original_stream
-        self.filename = filename
-        raw_logs_dir, _ = log_dirs()
-        self.log_path = raw_logs_dir / filename
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._handle = open(self.log_path, "a", encoding="utf-8")
-
-    def write(self, message):
-        self.terminal.write(message)
-        with self._lock:
-            self._handle.write(message)
-            self._handle.flush()
-
-    def flush(self):
-        self.terminal.flush()
-        with self._lock:
-            self._handle.flush()
-
-    def isatty(self):
-        return hasattr(self.terminal, 'isatty') and self.terminal.isatty()
-
-    def close(self):
-        with self._lock:
-            self._handle.close()
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
-    def __getattr__(self, attr):
-        return getattr(self.terminal, attr)
-
-_terminal_logging_configured = False
-
-def configure_terminal_logging():
-    global _terminal_logging_configured
-    raw_logs_dir, _ = log_dirs()
-    target_path = raw_logs_dir / "console.log"
-    if (
-        _terminal_logging_configured
-        and isinstance(sys.stdout, TerminalLogger)
-        and isinstance(sys.stderr, TerminalLogger)
-        and sys.stdout.log_path == target_path
-        and sys.stderr.log_path == target_path
-    ):
-        return
-    original_stdout = sys.stdout.terminal if isinstance(sys.stdout, TerminalLogger) else sys.stdout
-    original_stderr = sys.stderr.terminal if isinstance(sys.stderr, TerminalLogger) else sys.stderr
-    if isinstance(sys.stdout, TerminalLogger):
-        sys.stdout.close()
-    if isinstance(sys.stderr, TerminalLogger):
-        sys.stderr.close()
-    sys.stdout = TerminalLogger("console.log", original_stdout)
-    sys.stderr = TerminalLogger("console.log", original_stderr)
-    _terminal_logging_configured = True
-
-
-def restore_terminal_logging():
-    global _terminal_logging_configured
-    if isinstance(sys.stdout, TerminalLogger):
-        original_stdout = sys.stdout.terminal
-        sys.stdout.close()
-        sys.stdout = original_stdout
-    if isinstance(sys.stderr, TerminalLogger):
-        original_stderr = sys.stderr.terminal
-        sys.stderr.close()
-        sys.stderr = original_stderr
-    _terminal_logging_configured = False
 
 ALLOWED_ORIGINS = {
     "http://localhost:5173",
@@ -145,67 +67,6 @@ REVIEW_RESOLVED_STATES = {
 REVIEW_PENDING_STATES = {"pending", "deferred"}
 REVIEW_CLEANUP_STATES = {"pending_cleanup", "cleanup_failed"}
 REVIEW_VISIBLE_STATES = REVIEW_PENDING_STATES | REVIEW_CLEANUP_STATES
-LOCAL_RESULTS_LIMIT = 500
-_LOCAL_INGEST_LOCKS: dict[Path, threading.Lock] = {}
-_LOCAL_INGEST_STATES: dict[Path, dict] = {}
-_LOCAL_INGEST_STATE_LOCK = threading.Lock()
-
-
-def _runtime_key(ctx: WorkspaceContext | None = None) -> Path:
-    return (ctx or get_runtime_context()).active_vault.db_path.resolve()
-
-
-def _new_local_ingest_state() -> dict:
-    return {
-        "running": False,
-        "phase": "idle",
-        "run_id": None,
-        "scanned": 0,
-        "staged": 0,
-        "queued": 0,
-        "processed": 0,
-        "summary": {"ingested": 0, "review": 0, "failed": 0, "duplicate": 0},
-        "results": [],
-        "failed_paths": [],
-        "last_defaults": {},
-        "last_skip_similarity": False,
-        "started_at": None,
-        "finished_at": None,
-        "stop_requested": False,
-    }
-
-
-def local_ingest_state(ctx: WorkspaceContext | None = None) -> dict:
-    key = _runtime_key(ctx)
-    with _LOCAL_INGEST_STATE_LOCK:
-        state = _LOCAL_INGEST_STATES.get(key)
-        if state is None:
-            state = _new_local_ingest_state()
-            _LOCAL_INGEST_STATES[key] = state
-        return state
-
-
-def local_ingest_lock(ctx: WorkspaceContext | None = None) -> threading.Lock:
-    key = _runtime_key(ctx)
-    with _LOCAL_INGEST_STATE_LOCK:
-        lock = _LOCAL_INGEST_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _LOCAL_INGEST_LOCKS[key] = lock
-        return lock
-
-
-def local_ingest_stop_event(ctx: WorkspaceContext | None = None) -> threading.Event:
-    return local_stop_event(ctx)
-
-
-def reset_local_ingest_state(ctx: WorkspaceContext | None = None):
-    key = _runtime_key(ctx)
-    with _LOCAL_INGEST_STATE_LOCK:
-        _LOCAL_INGEST_STATES[key] = _new_local_ingest_state()
-    local_ingest_stop_event(ctx).clear()
-
-
 def _scan_auth_status_sync(reason: str = "manual") -> dict:
     cookie_status = get_cookie_auth_status()
     pixiv_token = get_pixiv_refresh_token()

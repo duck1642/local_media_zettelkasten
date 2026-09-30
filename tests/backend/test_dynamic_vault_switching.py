@@ -1,9 +1,10 @@
-import sys
-import shutil
-import pytest
-from pathlib import Path
-import yaml
 import importlib
+import shutil
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
@@ -38,6 +39,7 @@ def fresh_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *module_names
             "utils",
             "runtime_context",
             "runtime_activation",
+            "runtime_transitions",
             "queue_service",
             "md_generator",
             "metadata_index",

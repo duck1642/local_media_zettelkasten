@@ -9,9 +9,14 @@ from urllib.parse import parse_qs, urlparse
 
 from artists import ensure_artist_schema, normalize_artist_name, resolve_artist_name
 from fastapi import APIRouter, Depends, HTTPException
-from ingest_control import online_stop_event
+from ingest_control import (
+    LOCAL_RESULTS_LIMIT,
+    local_ingest_lock,
+    local_ingest_state,
+    local_stop_event as local_ingest_stop_event,
+    online_stop_event,
+)
 from logger import log_ingest_audit, log_ingest_local, log_system
-from metadata_index import metadata_repair_running
 from platforms import ensure_platform_schema, normalize_platform_key, resolve_platform_label
 from processor import process_file
 from pydantic import BaseModel
@@ -32,13 +37,9 @@ from utils import get_app_settings, utc_now, utc_now_str
 from workspace_db import connect_workspace_database
 
 from api.common import (
-    LOCAL_RESULTS_LIMIT,
     _local_ingest_dir,
     _open_path_external,
     _queue_name,
-    local_ingest_lock,
-    local_ingest_state,
-    local_ingest_stop_event,
 )
 from api.guards import require_usable_vault_context
 
@@ -456,18 +457,6 @@ def _snapshot_local_ingest_state(ctx: WorkspaceContext | None = None) -> dict:
             "finished_at": state["finished_at"],
             "stop_requested": bool(state.get("stop_requested")),
         }
-
-def runtime_switch_preflight(ctx: WorkspaceContext | None = None) -> dict:
-    ctx = ctx or get_runtime_context()
-    blockers = []
-    with local_ingest_lock(ctx):
-        if local_ingest_state(ctx).get("running"):
-            blockers.append("local_ingest_running")
-    if INGESTION_LOCK.locked():
-        blockers.append("online_ingest_running")
-    if metadata_repair_running(ctx):
-        blockers.append("metadata_repair_running")
-    return {"allowed": not blockers, "blockers": blockers}
 
 def _local_run_id() -> str:
     return f"{utc_now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"

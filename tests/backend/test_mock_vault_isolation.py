@@ -50,7 +50,7 @@ def fresh_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *module_names
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
     for name in list(sys.modules):
-        if name in {"api", "utils", "runtime_context", "runtime_activation", "queue_service", "md_generator", "media_lifecycle", "metadata_index", "metadata_maintenance", "processor", "external_ingestion", "thumbnails", "fingerprint", "artists", "platforms", "review_cache", "topics", "vaults", "vault_packages", "workspace_db", "ingest_control", "workspaces"} or name.startswith(("api.", "logger", "db.", "tagging", "downloaders")):
+        if name in {"api", "utils", "runtime_context", "runtime_activation", "runtime_transitions", "queue_service", "md_generator", "media_lifecycle", "metadata_index", "metadata_maintenance", "processor", "external_ingestion", "thumbnails", "fingerprint", "artists", "platforms", "review_cache", "topics", "vaults", "vault_packages", "workspace_db", "ingest_control", "workspaces"} or name.startswith(("api.", "logger", "db.", "tagging", "downloaders")):
             del sys.modules[name]
     from app_paths import get_app_paths
     from config_repository import SettingsRepository, bootstrap_data_home
@@ -553,26 +553,27 @@ def test_search_manager_context_isolates_ram_indexes(monkeypatch, tmp_path):
 
 def test_local_ingest_state_and_stop_events_are_context_isolated(monkeypatch, tmp_path):
     runtime_context, api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "api")
+    ingest_control = importlib.import_module("ingest_control")
     default_ctx = runtime_context.get_runtime_context()
     injected_ctx = injected_context_for(runtime_context, tmp_path)
 
-    api.common.reset_local_ingest_state(default_ctx)
-    api.common.reset_local_ingest_state(injected_ctx)
-    with api.common.local_ingest_lock(default_ctx):
-        api.common.local_ingest_state(default_ctx)["running"] = True
-        api.common.local_ingest_state(default_ctx)["failed_paths"] = ["default.jpg"]
-    with api.common.local_ingest_lock(injected_ctx):
-        api.common.local_ingest_state(injected_ctx)["running"] = False
-        api.common.local_ingest_state(injected_ctx)["failed_paths"] = ["injected.jpg"]
+    ingest_control.reset_local_ingest_state(default_ctx)
+    ingest_control.reset_local_ingest_state(injected_ctx)
+    with ingest_control.local_ingest_lock(default_ctx):
+        ingest_control.local_ingest_state(default_ctx)["running"] = True
+        ingest_control.local_ingest_state(default_ctx)["failed_paths"] = ["default.jpg"]
+    with ingest_control.local_ingest_lock(injected_ctx):
+        ingest_control.local_ingest_state(injected_ctx)["running"] = False
+        ingest_control.local_ingest_state(injected_ctx)["failed_paths"] = ["injected.jpg"]
 
-    api.common.local_ingest_stop_event(default_ctx).set()
+    ingest_control.local_stop_event(default_ctx).set()
 
     assert api.ingestion._snapshot_local_ingest_state(default_ctx)["running"] is True
     assert api.ingestion._snapshot_local_ingest_state(injected_ctx)["running"] is False
     assert api.ingestion._snapshot_local_ingest_state(default_ctx)["failed_paths"] == ["default.jpg"]
     assert api.ingestion._snapshot_local_ingest_state(injected_ctx)["failed_paths"] == ["injected.jpg"]
-    assert api.common.local_ingest_stop_event(default_ctx).is_set()
-    assert not api.common.local_ingest_stop_event(injected_ctx).is_set()
+    assert ingest_control.local_stop_event(default_ctx).is_set()
+    assert not ingest_control.local_stop_event(injected_ctx).is_set()
 
 
 def test_local_ingest_worker_resolves_relative_paths_using_injected_context(monkeypatch, tmp_path):
@@ -730,23 +731,25 @@ def test_metadata_watchdog_restart_clears_old_state_and_uses_new_context(monkeyp
 
 def test_runtime_switch_preflight_reports_runtime_blockers(monkeypatch, tmp_path):
     runtime_context, metadata_index, api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "metadata_index", "api")
+    ingest_control = importlib.import_module("ingest_control")
+    runtime_transitions = importlib.import_module("runtime_transitions")
     ctx = runtime_context.get_runtime_context()
-    api.common.reset_local_ingest_state(ctx)
+    ingest_control.reset_local_ingest_state(ctx)
 
-    assert api.ingestion.runtime_switch_preflight(ctx) == {"allowed": True, "blockers": []}
+    assert runtime_transitions.runtime_switch_preflight(ctx) == {"allowed": True, "blockers": []}
 
-    with api.common.local_ingest_lock(ctx):
-        api.common.local_ingest_state(ctx)["running"] = True
-    result = api.ingestion.runtime_switch_preflight(ctx)
+    with ingest_control.local_ingest_lock(ctx):
+        ingest_control.local_ingest_state(ctx)["running"] = True
+    result = runtime_transitions.runtime_switch_preflight(ctx)
     assert result["allowed"] is False
     assert "local_ingest_running" in result["blockers"]
 
-    with api.common.local_ingest_lock(ctx):
-        api.common.local_ingest_state(ctx)["running"] = False
+    with ingest_control.local_ingest_lock(ctx):
+        ingest_control.local_ingest_state(ctx)["running"] = False
     state = metadata_index._runtime_state(ctx)
     with state.repair_lock:
         state.repair_running = True
-    result = api.ingestion.runtime_switch_preflight(ctx)
+    result = runtime_transitions.runtime_switch_preflight(ctx)
     assert result["allowed"] is False
     assert "metadata_repair_running" in result["blockers"]
     with state.repair_lock:
@@ -754,7 +757,7 @@ def test_runtime_switch_preflight_reports_runtime_blockers(monkeypatch, tmp_path
 
     assert api.ingestion.INGESTION_LOCK.acquire(blocking=False)
     try:
-        result = api.ingestion.runtime_switch_preflight(ctx)
+        result = runtime_transitions.runtime_switch_preflight(ctx)
         assert result["allowed"] is False
         assert "online_ingest_running" in result["blockers"]
     finally:
@@ -1424,14 +1427,15 @@ def test_active_workspace_and_vault_switches_are_preflight_guarded(monkeypatch, 
     })
     workspace_parent = (Path(tempfile.gettempdir()) / f"lmz-switch-guard-test-{time.time_ns()}").resolve()
     try:
+        ingest_control = importlib.import_module("ingest_control")
         created = api.runtime._create_vault_sync({"name": "Guard Target"})
         assert any(item["id"] == "guard-target" for item in created["items"])
         added = api.runtime._create_workspace_sync({"path": str(workspace_parent), "name": "Guard Workspace"})
         workspace_id = next(item["id"] for item in added["items"] if item["name"] == "Guard Workspace")
 
         ctx = runtime_context.get_runtime_context()
-        with api.common.local_ingest_lock(ctx):
-            api.common.local_ingest_state(ctx)["running"] = True
+        with ingest_control.local_ingest_lock(ctx):
+            ingest_control.local_ingest_state(ctx)["running"] = True
         try:
             blocker = api.runtime._runtime_switch_blocker()
             assert blocker is not None
@@ -1450,8 +1454,8 @@ def test_active_workspace_and_vault_switches_are_preflight_guarded(monkeypatch, 
             assert workspace_exc.value.status_code == 409
             assert "local_ingest_running" in workspace_exc.value.detail["blockers"]
         finally:
-            with api.common.local_ingest_lock(ctx):
-                api.common.local_ingest_state(ctx)["running"] = False
+            with ingest_control.local_ingest_lock(ctx):
+                ingest_control.local_ingest_state(ctx)["running"] = False
 
         assert api.ingestion.INGESTION_LOCK.acquire(blocking=False)
         try:
@@ -1764,14 +1768,15 @@ def test_delete_item_removes_ram_indexes(monkeypatch, tmp_path):
 
 def test_local_ingest_state_guards_and_result_cap(monkeypatch, tmp_path):
     (api,) = fresh_backend(monkeypatch, tmp_path, "api")
+    ingest_control = importlib.import_module("ingest_control")
 
     api.ingestion._prepare_local_ingest_run("run-1", {"artist": "A"}, True)
-    state = api.common.local_ingest_state()
+    state = ingest_control.local_ingest_state()
     with pytest.raises(HTTPException) as exc:
         api.ingestion._prepare_local_ingest_run("run-2", {}, False)
     assert exc.value.status_code == 409
 
-    with api.common.local_ingest_lock():
+    with ingest_control.local_ingest_lock():
         state["running"] = False
         state["results"] = []
         for index in range(505):
@@ -1785,14 +1790,15 @@ def test_local_ingest_state_guards_and_result_cap(monkeypatch, tmp_path):
 
 def test_local_retry_preserves_defaults_and_skip_similarity(monkeypatch, tmp_path):
     (api,) = fresh_backend(monkeypatch, tmp_path, "api")
+    ingest_control = importlib.import_module("ingest_control")
     calls = []
-    state = api.common.local_ingest_state()
+    state = ingest_control.local_ingest_state()
 
     def fake_worker(paths, defaults, skip_similarity, run_id, ctx):
         calls.append((paths, defaults, skip_similarity, run_id, ctx))
 
     monkeypatch.setattr(api.ingestion, "_run_local_ingest_worker", fake_worker)
-    with api.common.local_ingest_lock():
+    with ingest_control.local_ingest_lock():
         state["running"] = False
         state["failed_paths"] = ["failed-a.jpg"]
         state["last_defaults"] = {"artist": "Retry Artist"}
@@ -1930,8 +1936,9 @@ def test_local_drop_intake_dedupes_paths(monkeypatch, tmp_path):
 
 def test_local_drop_intake_blocks_when_local_ingest_running(monkeypatch, tmp_path):
     (api,) = fresh_backend(monkeypatch, tmp_path, "api")
-    state = api.common.local_ingest_state()
-    with api.common.local_ingest_lock():
+    ingest_control = importlib.import_module("ingest_control")
+    state = ingest_control.local_ingest_state()
+    with ingest_control.local_ingest_lock():
         state["running"] = True
     try:
         payload = api.ingestion.LocalIngestDropIntakeRequest(session_id="s4", source_tab="vault", paths=["C:/tmp/a.jpg"])
@@ -1939,7 +1946,7 @@ def test_local_drop_intake_blocks_when_local_ingest_running(monkeypatch, tmp_pat
             api.ingestion._local_drop_intake_sync(payload)
         assert exc.value.status_code == 409
     finally:
-        with api.common.local_ingest_lock():
+        with ingest_control.local_ingest_lock():
             state["running"] = False
 
 
@@ -6036,17 +6043,17 @@ def test_vault_transition_preflight_rejects_before_mutation(monkeypatch, tmp_pat
     vaults, api = fresh_backend(monkeypatch, tmp_path, "vaults", "api")
     ctx = vaults._ctx()
     before_config = ctx.config_path.read_bytes()
-    ingestion = importlib.import_module("api.ingestion")
+    runtime_transitions = importlib.import_module("runtime_transitions")
     monkeypatch.setattr(
-        ingestion,
+        runtime_transitions,
         "runtime_switch_preflight",
         lambda *args, **kwargs: {"allowed": False, "blockers": ["test_transition_blocked"]},
     )
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(runtime_transitions.RuntimeSwitchBlockedError) as exc:
         vaults.create_vault("Blocked Vault")
 
-    assert exc.value.status_code == 409
+    assert exc.value.blockers == ["test_transition_blocked"]
     assert ctx.config_path.read_bytes() == before_config
     assert not (ctx.root / "data" / "vaults" / "blocked-vault").exists()
 
@@ -6138,6 +6145,8 @@ def test_relocation_activation_failure_restores_old_path_and_removes_new_files(m
     old_root = ctx.active_vault.root
     target_root = ctx.root / "data" / "vaults" / "relocation-failure"
     target_root.mkdir(parents=True)
+    existing_empty_dir = target_root / "user-created" / "empty"
+    existing_empty_dir.mkdir(parents=True)
     before_config = ctx.config_path.read_bytes()
     search_manager_module = importlib.import_module("db.search_manager")
     original_hydrate = search_manager_module.search_manager.hydrate
@@ -6155,7 +6164,53 @@ def test_relocation_activation_failure_restores_old_path_and_removes_new_files(m
     assert exc.value.status_code == 500
     assert ctx.config_path.read_bytes() == before_config
     assert runtime_context.get_runtime_context().active_vault.root == old_root
-    assert not any(target_root.rglob("*"))
+    assert {
+        path.relative_to(target_root)
+        for path in target_root.rglob("*")
+    } == {Path("user-created"), Path("user-created/empty")}
+
+
+def test_relocation_rejection_preserves_existing_outside_target_files(monkeypatch, tmp_path):
+    vaults, api, runtime_context = fresh_backend(monkeypatch, tmp_path, "vaults", "api", "runtime_context")
+    ctx = vaults._ctx()
+    target_root = tmp_path / "existing-outside-workspace"
+    marker = target_root / "user-data.txt"
+    empty_dir = target_root / "user-created" / "empty"
+    marker.parent.mkdir(parents=True)
+    empty_dir.mkdir(parents=True)
+    marker.write_text("keep this file", encoding="utf-8")
+    before_config = ctx.config_path.read_bytes()
+
+    with pytest.raises(HTTPException) as exc:
+        api.runtime._relocate_vault_sync("default", str(target_root))
+
+    assert exc.value.status_code == 400
+    assert marker.read_text(encoding="utf-8") == "keep this file"
+    assert empty_dir.is_dir()
+    assert ctx.config_path.read_bytes() == before_config
+    assert runtime_context.get_runtime_context().active_vault.id == "default"
+
+
+def test_relocation_snapshot_failure_preserves_existing_target_files(monkeypatch, tmp_path):
+    vaults, api, runtime_context = fresh_backend(monkeypatch, tmp_path, "vaults", "api", "runtime_context")
+    ctx = vaults._ctx()
+    target_root = ctx.root / "data" / "vaults" / "snapshot-failure"
+    target_root.mkdir(parents=True)
+    marker = target_root / "user-data.txt"
+    marker.write_text("keep this file", encoding="utf-8")
+    before_config = ctx.config_path.read_bytes()
+
+    def fail_snapshot(_root):
+        raise OSError("filesystem snapshot failed")
+
+    monkeypatch.setattr(vaults, "_capture_filesystem_paths", fail_snapshot)
+    with pytest.raises(HTTPException) as exc:
+        api.runtime._relocate_vault_sync("default", str(target_root))
+
+    assert exc.value.status_code == 500
+    assert marker.read_text(encoding="utf-8") == "keep this file"
+    assert ctx.config_path.read_bytes() == before_config
+    assert runtime_context.get_runtime_context().active_vault.id == "default"
 
 
 def test_relocation_config_failure_restores_old_path_and_config(monkeypatch, tmp_path):
@@ -6180,7 +6235,8 @@ def test_relocation_config_failure_restores_old_path_and_config(monkeypatch, tmp
 
 
 def test_vault_transition_uses_a1_lock(monkeypatch, tmp_path):
-    vaults, runtime_api = fresh_backend(monkeypatch, tmp_path, "vaults", "api.runtime")
+    (vaults, _) = fresh_backend(monkeypatch, tmp_path, "vaults", "api.runtime")
+    runtime_transitions = importlib.import_module("runtime_transitions")
     result = {}
     started = threading.Event()
 
@@ -6188,7 +6244,7 @@ def test_vault_transition_uses_a1_lock(monkeypatch, tmp_path):
         started.set()
         result["value"] = vaults.create_vault("Serialized Vault")
 
-    with runtime_api.runtime_transition_lock():
+    with runtime_transitions.runtime_transition_lock():
         worker = threading.Thread(target=run_create)
         worker.start()
         assert started.wait(2)

@@ -7,10 +7,17 @@ from config_repository import bootstrap_data_home
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from logger import log_system, reconfigure_logging, shutdown_logging
+from logger import (
+    configure_terminal_logging,
+    log_system,
+    reconfigure_logging,
+    restore_terminal_logging,
+    shutdown_logging,
+)
 from metadata_index import stop_metadata_watchdog
 from runtime_activation import activate_runtime_context
 from runtime_context import RuntimeNotLoadedError, build_runtime_context, has_runtime_context
+from runtime_transitions import RuntimeSwitchBlockedError
 
 from api import app_settings, capture, ingestion, library, logs, review, runtime
 from api.common import (
@@ -22,8 +29,6 @@ from api.common import (
     _review_dir,
     _scan_auth_status_sync,
     _validate_origin,
-    configure_terminal_logging,
-    restore_terminal_logging,
 )
 
 # These paths must work before workspace/vault runtime exists. Vault/data
@@ -99,6 +104,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LMZ API", lifespan=lifespan)
+
+
+@app.exception_handler(RuntimeSwitchBlockedError)
+async def runtime_switch_blocked_response(request: Request, exc: RuntimeSwitchBlockedError):
+    """Keep the existing HTTP 409 detail envelope for backend preflight failures."""
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": {
+                "detail": "Runtime switch blocked",
+                "blockers": exc.blockers,
+            }
+        },
+    )
+
 
 app.add_middleware(
     CORSMiddleware,

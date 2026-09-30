@@ -24,16 +24,16 @@ def require_usable_vault_context() -> VaultContext:
 def require_usable_target_vault_context(vault_id: str) -> VaultContext:
     ctx = require_workspace_context()
 
-    from vaults import _ctx_for_vault, _vault_entry
+    from vaults import get_vault_context
     try:
-        clean_id, entry, root = _vault_entry(vault_id, ctx)
+        target_workspace_ctx = get_vault_context(vault_id, ctx)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Vault not found: {vault_id}") from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    root = target_workspace_ctx.active_vault.root
     if not root or not vault_root_is_usable(root, ctx.root):
         raise HTTPException(status_code=503, detail=f"Target vault is offline or missing: {vault_id}")
 
-    target_workspace_ctx = _ctx_for_vault(vault_id, ctx)
     return target_workspace_ctx.active_vault
