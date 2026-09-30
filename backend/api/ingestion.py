@@ -314,7 +314,11 @@ class LocalIngestDropIntakeRequest(BaseModel):
     source_tab: str | None = None
     paths: list[str]
 
-def _iter_local_ingest_paths(paths: list[str], stop_event: threading.Event | None = None):
+def _iter_local_ingest_paths(
+    paths: list[str],
+    stop_event: threading.Event | None = None,
+    ctx: WorkspaceContext | None = None,
+):
     allowed_exts = {
         ext.lstrip(".").lower()
         for ext in get_app_settings().get("ingestion", {}).get("accepted_media", {}).get("extensions", [])
@@ -328,7 +332,8 @@ def _iter_local_ingest_paths(paths: list[str], stop_event: threading.Event | Non
             continue
         path = Path(text).expanduser()
         if not path.is_absolute():
-            path = (_local_ingest_dir() / path).resolve()
+            # Resolve relative inputs within this worker's workspace, not another active one.
+            path = (_local_ingest_dir(ctx) / path).resolve()
         else:
             path = path.resolve()
         if path.is_file():
@@ -371,7 +376,7 @@ def _local_drop_intake_sync(body: LocalIngestDropIntakeRequest):
     for raw in raw_paths:
         try:
             candidate = Path(raw).expanduser()
-            resolved = candidate.resolve() if candidate.is_absolute() else (_local_ingest_dir() / candidate).resolve()
+            resolved = candidate.resolve() if candidate.is_absolute() else (_local_ingest_dir(ctx) / candidate).resolve()
         except Exception:
             skipped.append({"path": raw, "reason": "invalid_path"})
             continue
@@ -546,7 +551,7 @@ def _run_local_ingest_worker(raw_paths: list[str], defaults: dict, skip_similari
     discovered = 0
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
-        for source_path in _iter_local_ingest_paths(raw_paths, stop_event):
+        for source_path in _iter_local_ingest_paths(raw_paths, stop_event, ctx=ctx):
             if stop_event.is_set():
                 break
             discovered += 1

@@ -575,6 +575,45 @@ def test_local_ingest_state_and_stop_events_are_context_isolated(monkeypatch, tm
     assert not api.common.local_ingest_stop_event(injected_ctx).is_set()
 
 
+def test_local_ingest_worker_resolves_relative_paths_using_injected_context(monkeypatch, tmp_path):
+    runtime_context, api = fresh_backend(monkeypatch, tmp_path, "runtime_context", "api")
+    default_ctx = runtime_context.get_runtime_context()
+    injected_ctx = injected_context_for(runtime_context, tmp_path)
+    default_source = default_ctx.active_vault.local_ingest_dir / "relative.jpg"
+    injected_source = injected_ctx.active_vault.local_ingest_dir / "relative.jpg"
+    default_source.parent.mkdir(parents=True, exist_ok=True)
+    default_source.write_bytes(b"default workspace source")
+    injected_source.parent.mkdir(parents=True, exist_ok=True)
+    injected_source.write_bytes(b"injected workspace source")
+    processed_sources = []
+
+    # Keep the active runtime on the default workspace while explicitly running for another one.
+    assert runtime_context.get_runtime_context() == default_ctx
+
+    def fake_process_file(path, config, metadata=None, delete_source=False, skip_similarity=False, ctx=None):
+        assert ctx == injected_ctx
+        processed_sources.append((Path(metadata["original_path"]), Path(path).read_bytes()))
+        if delete_source:
+            Path(path).unlink()
+        return True, "Success: relative.jpg", {}
+
+    monkeypatch.setattr(api.ingestion, "process_file", fake_process_file)
+    monkeypatch.setattr(
+        api.ingestion,
+        "get_app_settings",
+        lambda: {"ingestion": {"accepted_media": {"extensions": ["jpg"]}}},
+    )
+    monkeypatch.setattr(api.ingestion, "log_ingest_local", lambda *args, **kwargs: None)
+    monkeypatch.setattr(api.ingestion, "log_ingest_audit", lambda *args, **kwargs: None)
+
+    api.ingestion._prepare_local_ingest_run("run-injected", {}, False, 1, ctx=injected_ctx)
+    api.ingestion._run_local_ingest_worker(
+        ["relative.jpg"], {}, False, "run-injected", ctx=injected_ctx
+    )
+
+    assert processed_sources == [(injected_source.resolve(), b"injected workspace source")]
+
+
 def test_online_stop_event_helper_is_context_isolated(monkeypatch, tmp_path):
     runtime_context, ingest_control = fresh_backend(monkeypatch, tmp_path, "runtime_context", "ingest_control")
     default_ctx = runtime_context.get_runtime_context()
