@@ -23,6 +23,7 @@ from config_schema import (
     default_workspace_config,
     default_workspace_registry,
 )
+from vault_layout import ensure_vault_directories
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -184,27 +185,13 @@ def _create_data_home(paths: AppPaths) -> None:
     paths.app_dir.mkdir(parents=True, exist_ok=True)
     for directory in (paths.secrets_dir, paths.logs_dir, paths.models_dir, paths.cache_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    default_vault = paths.default_workspace_dir / "data" / "vaults" / "default"
     for directory in (
-        paths.default_workspace_dir / "data",
         paths.default_workspace_dir / "data" / "topics",
         paths.default_workspace_dir / "backups",
         paths.default_workspace_dir / "exports",
-        default_vault / "vault" / "assets",
-        default_vault / "vault" / "notes",
-        default_vault / "db",
-        default_vault / "review",
-        default_vault / "wd-tags",
-        default_vault / "ui_cache" / "thumbnails",
-        default_vault / "logs" / "raw",
-        default_vault / "logs" / "structured",
-        default_vault / "queues",
-        default_vault / "batches",
-        default_vault / "input",
-        default_vault / "local_ingest",
-        default_vault / "online_ingest",
     ):
         directory.mkdir(parents=True, exist_ok=True)
+    ensure_vault_directories(paths.default_workspace_dir / "data" / "vaults" / "default")
 
     SettingsRepository(paths.settings_path).create(default_app_settings())
     WorkspaceRegistryRepository(paths.registry_path).create(default_workspace_registry())

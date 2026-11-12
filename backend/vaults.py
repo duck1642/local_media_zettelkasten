@@ -18,11 +18,12 @@ from db.sqlite_operator import allocate_storage_id, init_database
 from media_lifecycle import remove_stale_derived_files, storage_lifecycle_lock
 from path_policy import vault_root_is_inside_workspace, vault_root_is_usable
 from runtime_context import (
-    VaultContext,
     WorkspaceContext,
     build_runtime_context,
+    build_vault_context,
     get_runtime_context,
 )
+from vault_layout import VAULT_LOCAL_DIRS, ensure_vault_directories
 from vault_packages import (
     BACKUP_PACKAGE_TYPE,
     EXPORT_PACKAGE_TYPE,
@@ -40,21 +41,6 @@ from vault_packages import (
     validate_archive_members,
 )
 
-VAULT_LOCAL_DIRS = (
-    "vault/assets",
-    "vault/notes",
-    "db",
-    "review",
-    "wd-tags",
-    "ui_cache/thumbnails",
-    "logs/raw",
-    "logs/structured",
-    "queues",
-    "batches",
-    "input",
-    "local_ingest",
-    "online_ingest",
-)
 EXPORT_IMPORT_ROOTS = {"db", "vault", "review"}
 BACKUP_RESTORE_ROOTS = {relative.split("/", 1)[0] for relative in VAULT_LOCAL_DIRS} | {"quarantine"}
 
@@ -223,34 +209,7 @@ def _vault_entry(vault_id: str, ctx: WorkspaceContext | None = None) -> tuple[st
 def _ctx_for_vault(vault_id: str, ctx: WorkspaceContext | None = None) -> WorkspaceContext:
     runtime = _ctx(ctx)
     clean_id, entry, root = _vault_entry(vault_id, runtime)
-    vault_dir = root / "vault"
-    vault_context = VaultContext(
-        id=clean_id,
-        name=str(entry.get("name") or clean_id),
-        root=root,
-        vault_dir=vault_dir,
-        assets_dir=vault_dir / "assets",
-        notes_dir=vault_dir / "notes",
-        db_path=root / "db" / "lmz_main.db",
-        review_dir=root / "review",
-        queues_dir=root / "queues",
-        local_ingest_dir=root / "local_ingest",
-        online_ingest_dir=root / "online_ingest",
-        batches_dir=root / "batches",
-        input_dir=root / "input",
-        wd_tags_dir=root / "wd-tags",
-        thumbnails_dir=root / "ui_cache" / "thumbnails",
-        logs_dir=root / "logs",
-    )
-    return WorkspaceContext(
-        config_path=runtime.config_path,
-        root=runtime.root,
-        topics_dir=runtime.topics_dir,
-        models_dir=runtime.models_dir,
-        workspace_db_path=runtime.workspace_db_path,
-        active_vault=vault_context,
-        vaults_configured=runtime.vaults_configured,
-    )
+    return replace(runtime, active_vault=build_vault_context(clean_id, str(entry.get("name") or clean_id), root))
 
 
 def get_vault_context(vault_id: str, ctx: WorkspaceContext | None = None) -> WorkspaceContext:
@@ -273,8 +232,7 @@ def _package_preflight(ctx: WorkspaceContext | None = None) -> None:
 
 
 def create_vault_layout(root: Path, initialize_db: bool = True):
-    for relative in VAULT_LOCAL_DIRS:
-        (root / relative).mkdir(parents=True, exist_ok=True)
+    ensure_vault_directories(root)
     if initialize_db:
         conn = init_database(vault_db_path(root))
         conn.close()
@@ -1547,9 +1505,7 @@ def import_vault_package(
         try:
             with zipfile.ZipFile(source, "r") as archive:
                 extract_members(archive, stage_root, members)
-            create_vault_layout(stage_root, initialize_db=not vault_db_path(stage_root).exists())
-            conn = init_database(vault_db_path(stage_root))
-            conn.close()
+            create_vault_layout(stage_root)
             final_root.parent.mkdir(parents=True, exist_ok=True)
             _rename_import_stage(stage_root, final_root)
             config["vaults"][clean_id] = entry
@@ -1600,9 +1556,7 @@ def restore_backup_package(
         try:
             with zipfile.ZipFile(source, "r") as archive:
                 extract_members(archive, stage_root, members)
-            create_vault_layout(stage_root, initialize_db=not vault_db_path(stage_root).exists())
-            conn = init_database(vault_db_path(stage_root))
-            conn.close()
+            create_vault_layout(stage_root)
             final_root.parent.mkdir(parents=True, exist_ok=True)
             _rename_import_stage(stage_root, final_root)
             config["vaults"][clean_id] = entry

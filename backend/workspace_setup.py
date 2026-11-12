@@ -7,6 +7,7 @@ from pathlib import Path
 
 from config_repository import WorkspaceConfigRepository
 from config_schema import default_workspace_config
+from vault_layout import ensure_vault_directories
 from workspaces import WORKSPACE_MARKER_NAME, WORKSPACE_MARKER_PAYLOAD
 
 
@@ -55,24 +56,9 @@ def setup_lmz_workspace(parent_path: str | Path, overwrite_config: bool = False)
     workspace = workspace_parent / "lmz"
     workspace_preexisted = workspace.exists()
     config_path = workspace / "config.yaml"
-    directories = [
-        workspace / "data" / "topics",
-        workspace / "data" / "vaults" / "default" / "vault" / "notes",
-        workspace / "data" / "vaults" / "default" / "vault" / "assets",
-        workspace / "data" / "vaults" / "default" / "db",
-        workspace / "data" / "vaults" / "default" / "logs" / "raw",
-        workspace / "data" / "vaults" / "default" / "logs" / "structured",
-        workspace / "data" / "vaults" / "default" / "review",
-        workspace / "data" / "vaults" / "default" / "wd-tags",
-        workspace / "data" / "vaults" / "default" / "ui_cache" / "thumbnails",
-        workspace / "data" / "vaults" / "default" / "queues",
-        workspace / "data" / "vaults" / "default" / "batches",
-        workspace / "data" / "vaults" / "default" / "input",
-        workspace / "data" / "vaults" / "default" / "local_ingest",
-        workspace / "data" / "vaults" / "default" / "online_ingest",
-    ]
-    for directory in directories:
-        directory.mkdir(parents=True, exist_ok=True)
+    topics_dir = workspace / "data" / "topics"
+    topics_dir.mkdir(parents=True, exist_ok=True)
+    directories = [topics_dir, *ensure_vault_directories(workspace / "data" / "vaults" / "default")]
     wrote_config = False
     repository = WorkspaceConfigRepository(config_path)
     if overwrite_config and config_path.exists():

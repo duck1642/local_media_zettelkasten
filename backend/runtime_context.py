@@ -5,7 +5,6 @@ from pathlib import Path
 
 from app_paths import get_app_paths
 from config_repository import WorkspaceConfigRepository
-from config_schema import VaultEntry
 
 
 import sys
@@ -90,11 +89,7 @@ def _resolve_from_root(root: Path, path_str: str | Path) -> Path:
     return value.resolve() if value.is_absolute() else (root / value).resolve()
 
 
-def _vault_context(root: Path, vault_id: str, entry: VaultEntry) -> VaultContext:
-    name = entry.name
-    vault_root = _resolve_from_root(root, entry.root)
-    if vault_root == root or not vault_root.is_relative_to(root):
-        raise ValueError(f"vault root escapes workspace: {entry.root}")
+def build_vault_context(vault_id: str, name: str, vault_root: Path) -> VaultContext:
     vault_dir = vault_root / "vault"
     return VaultContext(
         id=vault_id,
@@ -124,7 +119,11 @@ def build_runtime_context(config_path: str | Path | None = None, active_vault_id
     active_id = _slug_vault_id(str(active_vault_id or config.active_vault))
     if active_id not in vaults:
         raise ValueError(f"unknown vault: {active_id}")
-    active_vault = _vault_context(root, active_id, vaults[active_id])
+    entry = vaults[active_id]
+    vault_root = _resolve_from_root(root, entry.root)
+    if vault_root == root or not vault_root.is_relative_to(root):
+        raise ValueError(f"vault root escapes workspace: {entry.root}")
+    active_vault = build_vault_context(active_id, entry.name, vault_root)
 
     return WorkspaceContext(
         config_path=resolved_config_path,

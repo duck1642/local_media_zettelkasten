@@ -2,9 +2,9 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from artists import is_placeholder_artist, normalize_artist_name
+from artists import ensure_artist_schema, is_placeholder_artist, normalize_artist_name
 from config_repository import WorkspaceConfigRepository
-from platforms import _seed_known_aliases, _upsert_platform, normalize_platform_key
+from platforms import _seed_known_aliases, _upsert_platform, ensure_platform_schema, normalize_platform_key
 from utils import utc_now_str
 from runtime_context import WorkspaceContext, get_runtime_context
 
@@ -33,75 +33,9 @@ def _workspace_vault_db_paths(ctx: WorkspaceContext | None = None) -> list[Path]
 
 
 def ensure_workspace_schema(conn: sqlite3.Connection):
+    ensure_artist_schema(conn, backfill=False)
+    ensure_platform_schema(conn, backfill=False)
     cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS artists (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            name_norm TEXT NOT NULL UNIQUE,
-            kind TEXT NOT NULL DEFAULT 'artist',
-            notes TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS artist_aliases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            artist_id INTEGER NOT NULL,
-            alias TEXT NOT NULL,
-            alias_norm TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(artist_id) REFERENCES artists(id) ON DELETE CASCADE
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS artist_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            artist_id INTEGER NOT NULL,
-            platform TEXT NOT NULL,
-            url TEXT NOT NULL,
-            url_norm TEXT NOT NULL,
-            handle TEXT NOT NULL DEFAULT '',
-            is_primary INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(artist_id, url_norm),
-            FOREIGN KEY(artist_id) REFERENCES artists(id) ON DELETE CASCADE
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_artists_name_norm ON artists(name_norm)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_artist_aliases_artist ON artist_aliases(artist_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_artist_aliases_norm ON artist_aliases(alias_norm)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_artist_links_artist ON artist_links(artist_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_artist_links_platform ON artist_links(platform)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_artist_links_url_norm ON artist_links(url_norm)")
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS platforms (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key_norm TEXT NOT NULL UNIQUE,
-            display_name TEXT NOT NULL,
-            kind TEXT NOT NULL DEFAULT 'source',
-            notes TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS platform_aliases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            platform_id INTEGER NOT NULL,
-            alias TEXT NOT NULL,
-            alias_norm TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(platform_id) REFERENCES platforms(id) ON DELETE CASCADE
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_platforms_key_norm ON platforms(key_norm)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_platform_aliases_platform ON platform_aliases(platform_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_platform_aliases_norm ON platform_aliases(alias_norm)")
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS wd_tag_dictionary (
             tag_norm TEXT PRIMARY KEY,
