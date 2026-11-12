@@ -531,6 +531,11 @@ def _cleanup_local_run_dir(run_dir: Path):
         log_ingest_local("WARNING", "Failed to clean local ingest staging directory", run_id=run_dir.name, path=str(run_dir), error=str(exc))
 
 def _run_local_ingest_worker(raw_paths: list[str], defaults: dict, skip_similarity: bool, run_id: str, ctx: WorkspaceContext | None = None):
+    """Kaynakları çalışma dizinine kopyalayıp kasaya aktar; özgün dosyalara dokunma.
+
+    İstemcinin takip ettiği durum ve sayaçlar kasa kilidi altında güncellenir.
+    Durdurma sinyali sıradaki dosyaya geçmeden kontrol edilir.
+    """
     ctx = ctx or get_runtime_context()
     cfg = get_app_settings()
     run_dir = ctx.active_vault.local_ingest_dir / run_id
@@ -591,6 +596,7 @@ def _run_local_ingest_worker(raw_paths: list[str], defaults: dict, skip_similari
             with lock:
                 state["phase"] = "running"
             try:
+                # delete_source burada özgün dosyayı değil, biraz önce hazırlanan kopyayı siler.
                 ok, message, index_data = process_file(
                     staged_path,
                     cfg,

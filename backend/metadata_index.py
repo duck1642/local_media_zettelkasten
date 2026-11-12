@@ -777,6 +777,11 @@ def reindex_item_metadata(
     update_facets: bool = True,
     update_workspace_wd: bool = True,
 ) -> dict:
+    """Bir medya kaydının konu ve etiket satırlarını nottan ve önbellekten yenile.
+
+    Arama/filtre sayaçları da güncellenebilir. Kasa bağlantısındaki değişiklikleri
+    commit etmek çağırana aittir; çalışma alanı etiket sözlüğü ayrı yazılır.
+    """
     ensure_metadata_schema(conn)
     storage_id = _item_storage_id(conn, item_hash)
     if storage_id is None:
@@ -934,6 +939,7 @@ def safe_reindex_item_metadata(
     update_dirty_queue: bool = True,
     update_workspace_wd: bool = True,
 ) -> dict:
+    """İndeks güncellemesini dene; hata halinde aktarımı kesmek yerine durumu kaydet."""
     if update_dirty_queue:
         enqueue_metadata_dirty(conn, item_hash, context or "reindex")
     try:
@@ -1215,6 +1221,11 @@ def rebuild_all_metadata(
     context: str = "full",
     progress_callback=None,
 ) -> dict:
+    """Kasanın not ve etiket indeksini baştan kur; isteğe bağlı ilerleme bildir.
+
+    Medya satırları kaynak olarak kalır; konu, etiket ve sayaç gibi türetilmiş
+    tablolar yeniden doldurulur.
+    """
     ensure_metadata_schema(conn)
     started = time.perf_counter()
     stages: dict[str, float] = {
@@ -1245,6 +1256,7 @@ def rebuild_all_metadata(
     success = False
     try:
         stage_started = time.perf_counter()
+        # İkincil indeksleri satır satır güncellemek yerine toplu yazımdan sonra yeniden kur.
         _drop_metadata_secondary_indexes(conn)
         stages["secondary_index_drop"] += (time.perf_counter() - stage_started) * 1000
 

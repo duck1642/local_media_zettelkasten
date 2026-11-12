@@ -110,6 +110,11 @@ def generate_video_thumbnail(asset_path: Path, item_hash: str, storage_id: str, 
 
 
 def ensure_thumbnail(item_hash: str, extension: str | None, mime_type: str | None, wait: bool = True, storage_id: str | None = None, ctx: WorkspaceContext | None = None) -> Path:
+    """Güncel küçük resmi kullan; yoksa medya türüne göre oluştur.
+
+    Medya kilidi silme işlemiyle çakışmayı önler, semafor üretim sayısını
+    sınırlar. wait=False iken gerekli izin alınamazsa ThumbnailBusyError yükselir.
+    """
     storage_id = require_storage_id(storage_id)
     lifecycle_lock = storage_lifecycle_lock(storage_id, ctx=ctx)
     lifecycle_acquired = lifecycle_lock.acquire(blocking=wait)

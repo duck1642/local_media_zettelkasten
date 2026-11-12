@@ -1,3 +1,5 @@
+"""FastAPI uygulamasını Uvicorn ile çalıştıran geliştirme ve sidecar giriş noktası."""
+
 import os
 import sys
 

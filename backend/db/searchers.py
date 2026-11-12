@@ -1,8 +1,10 @@
+"""Arama yöneticisinin kullandığı küçük, bellek içi arama yapıları."""
 
 import copy
 
 
 class BKTreeSearcher:
+    """Algısal hash'leri Hamming uzaklığıyla arar; kilitleme çağırana aittir."""
 
     def __init__(self):
         self.tree = None
@@ -22,6 +24,7 @@ class BKTreeSearcher:
             return max(len(str(h1 or "")), len(str(h2 or ""))) * 4 + 1
 
     def add(self, item_hash: str, phash_str: str):
+        """Aynı kayıt/hash çiftini ikinci kez eklemeden ağacı güncelle."""
 
         if not phash_str or phash_str == "None":
             return
@@ -33,6 +36,7 @@ class BKTreeSearcher:
         self._add_to_tree(item_hash, phash_str)
 
     def remove_hashes(self, item_hashes: set[str]) -> dict:
+        """Verilen medya kimliklerinin tüm imzalarını kaldır; gerekirse ağacı yeniden kur."""
         if not item_hashes:
             return {"removed": 0, "rebuilt": False}
         before = len(self.items)
@@ -70,6 +74,7 @@ class BKTreeSearcher:
                 break
 
     def query(self, query_phash: str, threshold: int) -> list[tuple[str, int]]:
+        """Eşik içindeki (kayıt hash'i, bit uzaklığı) çiftlerini yakından uzağa ver."""
         # SearchManager serializes queries and mutations with its state lock.
         # Avoid copying the entire index for each lookup inside that lock.
         return self.query_snapshot(self.tree, query_phash, threshold)
@@ -79,6 +84,7 @@ class BKTreeSearcher:
 
     @classmethod
     def query_snapshot(cls, tree, query_phash: str, threshold: int) -> list[tuple[str, int]]:
+        """Yalnızca eşik aralığında sonuç verebilecek ağaç dallarını dolaş."""
 
         if tree is None or not query_phash:
             return []
@@ -102,6 +108,7 @@ class BKTreeSearcher:
         return sorted(results, key=lambda x: x[1])
 
 class URLRegistry:
+    """Kaynak URL'leri SQLite ile aynı normalleştirme kuralıyla bellekte tutar."""
 
     def __init__(self):
         self.seen_urls = set()

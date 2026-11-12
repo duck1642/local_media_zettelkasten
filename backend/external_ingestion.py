@@ -1,3 +1,4 @@
+"""Çevrimiçi bağlantı kuyruğunu platformlara ayırır, indirir ve kasaya aktarır."""
 
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
@@ -36,6 +37,7 @@ _GLOBAL_WORKER_LIMIT_LOCK = threading.Lock()
 
 
 def _online_process_metadata(metadata: dict, run_id: str, user_metadata: dict | None = None) -> dict:
+    """İndiriciden kaynak bilgisini al; kuyrukta belirtilen artist/platforma öncelik ver."""
     source = metadata or {}
     process_metadata = {
         key: source[key]
@@ -52,6 +54,8 @@ def _online_process_metadata(metadata: dict, run_id: str, user_metadata: dict | 
 
 
 class ExternalIngestor:
+    """Tek kuyruk çalışmasını kasa bağlamına bağlar ve indirme işçilerini yönetir."""
+
     def __init__(self, links_file: str, skip_validation: bool = False, ctx: WorkspaceContext | None = None):
         self.ctx = ctx or get_runtime_context()
         self.links_file = Path(links_file)
@@ -73,6 +77,12 @@ class ExternalIngestor:
             self.worker_limit = GLOBAL_WORKER_LIMIT
 
     def run(self) -> dict:
+        """Kuyruğu çalıştır ve işlenen, atlanan, hatalı kayıt sayaçlarını döndür.
+
+        Platform sonuçları toplandıktan sonra RAM indeksi güncellenir. Durdurma
+        yüzünden başlanamayan veya platform hatasında korunan URL'ler kaynak
+        kuyruğa yeniden yazılır.
+        """
 
         stats = {"processed": 0, "skipped": 0, "errors": 0}
         batch_index_queue = []
@@ -166,6 +176,11 @@ class ExternalIngestor:
         return stats
 
     def _manage_platform_queue(self, platform: str, urls: List[QueueEntry]) -> Tuple[dict, List[QueueEntry], List[dict]]:
+        """Platform işçilerini çalıştır; durdurma sinyalinden sonra yeni URL başlatma.
+
+        Sayaçları, ertelenen kuyruk kayıtlarını ve RAM indeksine girecek
+        verileri döndürür. Başlamış işler tamamlanır.
+        """
 
         concurrency = self.config.get("ingestion", {}).get("concurrency", {})
         plat_config = concurrency.get("platforms", {}).get(
@@ -234,6 +249,7 @@ class ExternalIngestor:
         return plat_stats, plat_remaining, plat_index_data
 
     def _worker_item(self, platform: str, entry: QueueEntry, jitter_range: list) -> Tuple[bool, str, dict, List[dict]]:
+        """Tek URL'yi işle; başarı, URL, sayaçlar ve indeks girdilerini döndür."""
 
         item_stats = {"processed": 0, "skipped": 0, "errors": 0}
         url = entry.url
@@ -493,6 +509,7 @@ class ExternalIngestor:
             conn.close()
 
     def _url_complete(self, url: str, expected_count: int = None) -> bool:
+        """URL'nin tüm kayıtlı dosyalarının diskte ve beklenen sayıda olduğunu doğrula."""
         conn = connect_database() if self.ctx is None else connect_database(ctx=self.ctx)
         try:
             rows = conn.execute(
@@ -522,6 +539,12 @@ class ExternalIngestor:
             conn.close()
 
     def _rollback_batch(self, batch_data: List[dict]) -> int | None:
+        """Yarım kalan bir toplu aktarımı önce SQLite'tan, sonra disk ve RAM'den temizle.
+
+        SQLite silme işlemi tamamlanmazsa None döner ve dosyalar silinmez.
+        Başarılı commit sonrasında dönüş değeri silinen satır sayısıdır;
+        sonraki dosya temizliği hataları ayrıca loglanır.
+        """
         conn = None
         removed_indexes = []
         cleanup_paths = []
@@ -649,6 +672,7 @@ class ExternalIngestor:
         return None
 
     def _write_back(self, links: List[QueueEntry]):
+        """Kalan bağlantıları özgün satır sırası ve grup metadata'sıyla kuyruğa yaz."""
 
         with open(self.links_file, 'w', encoding='utf-8') as f:
             if links:

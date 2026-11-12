@@ -1,3 +1,4 @@
+"""Etiketleme servisinin diğer backend modüllerine açtığı ortak giriş noktası."""
 
 from tagging.contracts import Prediction, TaggerBackend, TagResult
 from tagging.registry import describe_models

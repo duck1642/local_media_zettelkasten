@@ -1,4 +1,5 @@
 
+"""API kullanmadan bağlantı kuyruklarını ve yerel girdi dizinini işleyen CLI."""
 
 from logger import log_ingest_local, log_ingest_online
 from utils import setup_directories, get_app_settings
@@ -12,6 +13,7 @@ from app_paths import get_app_paths
 from config_repository import bootstrap_data_home
 
 def main():
+    """Kasayı hazırla; normal ve force kuyruklarından sonra yerel dosyaları işle."""
 
     bootstrap_data_home(get_app_paths())
     ctx = reload_runtime_context()

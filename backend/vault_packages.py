@@ -140,6 +140,7 @@ def _looks_absolute_path(value: str) -> bool:
 
 
 def validate_archive_members(archive: zipfile.ZipFile, *, allowed_roots: Iterable[str]) -> list[zipfile.ZipInfo]:
+    """Manifesti zorunlu tut; çıkartılacak dosyaları izin verilen klasörlerle sınırla."""
     allowed = {root.strip("/") for root in allowed_roots if str(root or "").strip("/")}
     if not allowed:
         raise VaultPackageError("archive validation requires allowed roots")
@@ -180,6 +181,7 @@ def validate_member_name(filename: str, *, allowed_roots: Iterable[str]) -> str:
 
 
 def extract_members(archive: zipfile.ZipFile, destination: Path, members: Iterable[zipfile.ZipInfo]) -> None:
+    """Dosyaları hedefe akış halinde yaz; çözümlenen yolun hedef dışına çıkmasını engelle."""
     root = destination.resolve()
     root.mkdir(parents=True, exist_ok=True)
     for member in members:
@@ -192,6 +194,7 @@ def extract_members(archive: zipfile.ZipFile, destination: Path, members: Iterab
 
 
 def snapshot_sqlite_database(source_db: Path, target_db: Path) -> None:
+    """Ana dosyayı kopyalamak yerine SQLite ile tutarlı bir veritabanı anlık görüntüsü al."""
     if not source_db.exists():
         raise VaultPackageError(f"database does not exist: {source_db}")
     target_db.parent.mkdir(parents=True, exist_ok=True)

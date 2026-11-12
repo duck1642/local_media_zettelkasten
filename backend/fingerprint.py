@@ -173,6 +173,7 @@ def extract_sampled_video_frames(video_path: Path, frame_count: int = 5) -> list
     return frames
 
 def get_visual_embedding(video_path: Path) -> bytes:
+    """Örnek video karelerinin model vektörlerini ortalayıp float32 olarak sakla."""
 
     try:
         model = get_model()
@@ -201,6 +202,7 @@ def get_visual_embedding(video_path: Path) -> bytes:
         return b''
 
 def compare_audio_fingerprints(fp1_bytes: bytes, fp2_bytes: bytes) -> float:
+    """Ortak uzunlukta eşleşen bitlerin oranını hesapla; eksik imza için sıfır ver."""
 
     if not fp1_bytes or not fp2_bytes:
         return 0.0
@@ -222,6 +224,7 @@ def compare_audio_fingerprints(fp1_bytes: bytes, fp2_bytes: bytes) -> float:
     b = b[:length]
 
 
+    # XOR, yalnızca farklı bitleri 1 yapar. uint32 tüm 32 biti işaretsiz saydırır.
     xor_res = a.astype(np.uint32) ^ b.astype(np.uint32)
 
 

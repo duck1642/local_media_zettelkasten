@@ -69,6 +69,7 @@ def _serialize(value: BaseModel) -> bytes:
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:
+    """Önce aynı dizinde geçici dosyaya yaz, sonra hedefi tek adımda değiştir."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     temp_path = Path(temp_name)
@@ -85,6 +86,8 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 
 @contextmanager
 def _file_lock(path: Path):
+    """Yapılandırmayı değiştirebilen farklı LMZ süreçlerini aynı kilitte sırala."""
+    # Asıl YAML dosyası os.replace ile değişir; bu yüzden kilit ayrı bir dosyada tutulur.
     lock_path = path.with_name(f".{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+b") as handle:
@@ -113,6 +116,8 @@ def _file_lock(path: Path):
 
 
 class YamlRepository(Generic[ModelT]):
+    """Tipi doğrulanmış YAML yapılandırmasını sürüm bilgisiyle okur ve yazar."""
+
     def __init__(self, path: Path, model_type: type[ModelT]):
         self.path = Path(path)
         self.model_type = model_type
@@ -144,6 +149,7 @@ class YamlRepository(Generic[ModelT]):
                 return VersionedValue(value=validated, etag=_etag(payload))
 
     def replace(self, value: ModelT, *, expected_etag: str) -> VersionedValue[ModelT]:
+        """Beklenen sürüm hâlâ geçerliyse eski dosyayı yedekle ve yenisini yaz."""
         validated = self.model_type.model_validate(value.model_dump(mode="python"))
         payload = _serialize(validated)
         with self._lock:

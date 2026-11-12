@@ -28,6 +28,7 @@ _INFERENCE_LOCK = threading.RLock()
 
 
 def unload_models() -> None:
+    """Devam eden çıkarımı bekle ve yüklü model kaynaklarını serbest bırak."""
     with _INFERENCE_LOCK:
         _unload_models()
 
@@ -42,6 +43,12 @@ def tag_media(
     storage_id: str | None = None,
     ctx: WorkspaceContext | None = None,
 ) -> TagResult:
+    """Görseli veya videoyu etiketle ve sonucu çağırana durumuyla birlikte ver.
+
+    Model ve yazma hataları, normalde exception yerine TagResult içinde
+    bildirilir. Depolama kimliği yoksa tahmin üretilir ancak önbelleğe yazılmaz.
+    Başarısız yeniden etiketleme, önceki başarılı önbelleği korur.
+    """
     path = Path(media_path)
     result = TagResult(
         hash=item_hash or "",
@@ -79,6 +86,7 @@ def tag_media(
 
 
 def _infer_media(result: TagResult, path: Path, config: dict, ctx) -> None:
+    """Medya türünü belirle ve tek görselden veya video karelerinden sonucu doldur."""
     backend_id, model, thresholds, profile = resolve_model(config)
     result.backend, result.model = backend_id, model
     result.thresholds, result.output_profile = thresholds, profile
@@ -158,6 +166,11 @@ def _infer_media(result: TagResult, path: Path, config: dict, ctx) -> None:
 def _merge_frame_groups(
     frames: list[dict], max_tags: int, min_frames: int, high_confidence: float
 ) -> dict:
+    """Karelerde tekrarlanan veya tek başına güven eşiğini geçen etiketleri birleştir.
+
+    Etiket skoru, bulunduğu karelerdeki skorların ortalamasıdır. Rating için
+    tekrar eşiği uygulanmaz; yalnızca en yüksek skorlu etiket tutulur.
+    """
     categories = dict.fromkeys(category for frame in frames for category in frame["groups"])
     groups = {}
     for category in categories:
@@ -189,6 +202,7 @@ def _write_result(
     media_path: str | Path | None = None,
     ctx: WorkspaceContext | None = None,
 ) -> bool:
+    """Medya dosyası hâlâ mevcutsa sonucu yaz; başarılı tahminleri hatalı sonuçla değiştirme."""
     if not result.hash or not storage_id:
         return False
     source = Path(media_path) if media_path is not None else None
@@ -204,6 +218,7 @@ def _write_result(
 
 
 def load_tag_cache(item_hash: str, storage_id: str) -> dict:
+    """Önbelleği ortak biçimde oku; eksik veya bozuk önbellek için boş sözlük ver."""
     return _read_tag_cache(wd_tag_cache_path_for(item_hash, storage_id))
 
 
@@ -220,6 +235,7 @@ def _read_tag_cache(path: Path) -> dict:
 
 
 def wd_frontmatter_fields(item_hash: str, storage_id: str) -> dict:
+    """Başarılı tahminleri not başlığına uygun, skor içermeyen alanlara çevir."""
     data = load_tag_cache(item_hash, storage_id)
     if data.get("status") != "ok":
         return {"wd_rating": "", "wd_character_tags": [], "wd_tags": []}

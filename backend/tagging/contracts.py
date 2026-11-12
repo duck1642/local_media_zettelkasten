@@ -1,3 +1,5 @@
+"""Model adaptörlerinin ve etiketleme servisinin paylaştığı veri biçimleri."""
+
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
@@ -6,6 +8,8 @@ from PIL import Image
 
 @dataclass(frozen=True)
 class Prediction:
+    """Çıktı profili uygulanmadan önce modelden gelen tek etiket tahmini."""
+
     name: str
     category: str
     score: float | None = None
@@ -16,6 +20,8 @@ class Prediction:
 
 
 class TaggerBackend(Protocol):
+    """Tek görüntüden tahmin üreten ve model kaynaklarını kapatabilen adaptör."""
+
     @property
     def provider(self) -> str: ...
 
@@ -29,6 +35,8 @@ class TaggerBackend(Protocol):
 
 @dataclass
 class TagResult:
+    """Bir medyanın durumu, kaynak tahminleri ve notlara aktarılacak etiket grupları."""
+
     hash: str
     status: str
     model: str

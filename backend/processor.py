@@ -1,3 +1,4 @@
+"""Tek medya dosyasını doğrular, benzerlik arar ve kasaya aktarır."""
 
 import shutil
 import json
@@ -56,6 +57,7 @@ def _review_original_name(filepath: Path, metadata: dict) -> str:
     return filepath.name
 
 def _move_to_review(filepath: Path, file_hash: str, metadata: dict, sidecar_fields: dict, ctx: WorkspaceContext | None = None) -> Path:
+    """Dosyayı incelemeye taşı; kaynak bilgilerini ve eşleşmeleri yan JSON'a yaz."""
     review_dir = _ctx(ctx).active_vault.review_dir
     review_dir.mkdir(parents=True, exist_ok=True)
     original_name = _review_original_name(filepath, metadata)
@@ -94,6 +96,11 @@ def _pending_review_match(file_hash: str, ctx: WorkspaceContext | None = None) -
     return cached_pending_review_match(file_hash, ctx=ctx)
 
 def calculate_tiles(filepath: Path, ratio_threshold: float = 3.0) -> list:
+    """Uzun görsellerin tam kare parçaları için sıralı algısal hash'ler hesapla.
+
+    En-boy oranı eşiği sağlanmazsa, ölçüler geçersizse veya okuma başarısızsa
+    boş liste döner. Sona kalan eksik kare hesaba katılmaz.
+    """
 
     try:
         from PIL import Image
@@ -148,6 +155,12 @@ def calculate_tiles(filepath: Path, ratio_threshold: float = 3.0) -> list:
         return []
 
 def find_visual_duplicate(new_phash: str, threshold: int = IMAGE_REVIEW_PHASH_THRESHOLD, new_tiles: list = None, ctx: WorkspaceContext | None = None, return_all: bool = False) -> Tuple[Optional[str], Optional[str], int, Optional[int], List[str]] | Tuple[Optional[str], Optional[str], int, Optional[int]]:
+    """Önce tüm görselle, eşleşme yoksa yeni görselin parçalarıyla ara.
+
+    Sonuç: seçilen hash, eşleşme türü, bulunan eşleşme sayısı ve uzaklık.
+    return_all ayrıca bulunan benzersiz hash'leri seçilen hash başta olacak
+    şekilde döndürür. Onarılamayan indeks hatası çağırana iletilir.
+    """
 
     best_match = None
     match_type = None
@@ -201,6 +214,11 @@ def find_visual_duplicate(new_phash: str, threshold: int = IMAGE_REVIEW_PHASH_TH
     return best_match, match_type, total_conflicts, min_distance
 
 def find_video_duplicate(audio_hash: bytes, visual_embedding: bytes, ai_threshold: float = 0.08, ctx: WorkspaceContext | None = None, return_all: bool = False) -> Tuple[Optional[str], Optional[str], int, Optional[float], List[str]] | Tuple[Optional[str], Optional[str], int, Optional[float]]:
+    """Ses ve görsel eşleşmelerini birleştir; iki sinyalde de bulunan kayda öncelik ver.
+
+    Sonuç: seçilen hash, eşleşme türü, sinyal eşleşmesi sayısı ve benzerlik.
+    return_all benzersiz aday hash'lerini de ekler.
+    """
 
     best_match = None
     match_type = None
@@ -261,6 +279,17 @@ def find_video_duplicate(audio_hash: bytes, visual_embedding: bytes, ai_threshol
     return best_match, match_type, total_conflicts, max_similarity if best_match else None
 
 def process_file(filepath: Path, config: dict, metadata: dict = None, delete_source: bool = False, skip_similarity: bool = False, sync_index: bool = True, ctx: WorkspaceContext | None = None, allow_pending_review: bool = False) -> Tuple[bool, str, Optional[dict]]:
+    """Dosyayı kasaya al veya benzer bir kayıt bulunursa inceleme alanına taşı.
+
+    skip_similarity yalnız benzerlik aramasını atlar; birebir hash kontrolü
+    sürer. Başarılı aktarımda dosya ve not yazılır, SQLite işlemi tamamlanır
+    ve arama indeksine girecek bilgiler döndürülür. sync_index kapalıysa
+    bu bilgileri RAM indeksine eklemek çağırana kalır.
+
+    Dönüş değeri (başarı, mesaj, indeks bilgisi) üçlüsüdür. Commit öncesi
+    hata aktarımı geri alır; commit sonrası hata kaydı silmez. delete_source
+    başarılı aktarımın ardından kaynak dosyayı silmeyi dener.
+    """
 
     metadata = metadata or {}
     index_data = None

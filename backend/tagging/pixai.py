@@ -10,7 +10,10 @@ from tagging.contracts import Prediction
 
 
 class PixaiTagger:
+    """PixAI Transformers modelini PyTorch CPU veya CUDA üzerinde çalıştırır."""
+
     def __init__(self, model: str, device: str, models_dir: Path, local_path: str = ""):
+        """Yerel model klasörünü tercih et; açık CUDA isteğinde CPU'ya düşme."""
         try:
             import timm  # noqa: F401 -- required by the official model code
             import torch
@@ -66,6 +69,7 @@ class PixaiTagger:
         return ""
 
     def predict(self, image: Image.Image, thresholds: dict[str, float]) -> list[Prediction]:
+        """Görseli RGB olarak modele ver ve kategori skorlarını ortak biçime çevir."""
         with self._torch.inference_mode():
             output = self.pipeline(image.convert("RGB"), threshold=thresholds)
         groups = output.get("results")
@@ -83,6 +87,7 @@ class PixaiTagger:
         return predictions
 
     def close(self) -> None:
+        """Pipeline referansını bırak ve CUDA kullanılmışsa boş önbelleği temizle."""
         self.pipeline = None
         gc.collect()
         if self._device == "cuda":

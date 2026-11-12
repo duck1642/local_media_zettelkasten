@@ -1,3 +1,4 @@
+"""Kasanın SQLite şemasını, medya kayıtlarını ve arama imzalarını yönetir."""
 
 import sqlite3
 import threading
@@ -18,6 +19,7 @@ def _active_db_path(ctx: WorkspaceContext | None = None) -> Path:
 
 
 def int_to_storage_id(value: int) -> str:
+    """Negatif olmayan sayacı 12 karakterlik, sıfır dolgulu base36 kimliğe çevir."""
     value = int(value)
     if value < 0:
         raise ValueError("storage id value must be non-negative")
@@ -36,6 +38,7 @@ def int_to_storage_id(value: int) -> str:
 
 
 def storage_id_to_int(storage_id: str) -> int | None:
+    """Base36 kimliği sayıya çevir; boş veya tanınmayan karakterler varsa None ver."""
     text = str(storage_id or "").strip().lower()
     if not text or any(ch not in STORAGE_ID_ALPHABET for ch in text):
         return None
@@ -47,6 +50,7 @@ def storage_id_to_int(storage_id: str) -> int | None:
 
 
 def normalize_source_url(url: str) -> str:
+    """URL karşılaştırması için fragment'ı kaldır ve sorgu parametrelerini sırala."""
 
     if not url:
         return ""
@@ -62,6 +66,11 @@ def normalize_source_url(url: str) -> str:
     return urlunsplit((scheme, host, path, query, ""))
 
 def init_database(db_path: Path | None = None, ctx: WorkspaceContext | None = None):
+    """SQLite'ı aç, eksik şema ve eski satırlar için gerekli güncellemeleri uygula.
+
+    Şema işlemleri dönüşten önce commit edilir. Dönen açık bağlantıyı
+    kapatmak çağıranın sorumluluğudur.
+    """
     target_path = Path(db_path or _active_db_path(ctx)).resolve()
     target_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(target_path, timeout=5)
@@ -170,6 +179,7 @@ def init_database(db_path: Path | None = None, ctx: WorkspaceContext | None = No
 
 
 def connect_database(ctx: WorkspaceContext | None = None):
+    """Kasa veritabanına bağlan; süreçte ilk erişimde veya dosya yoksa şemayı kur."""
     target_path = _active_db_path(ctx)
     if target_path not in _SCHEMA_READY_PATHS or not target_path.exists():
         with _SCHEMA_LOCK:
@@ -204,8 +214,10 @@ def _ensure_storage_counter(conn: sqlite3.Connection):
 
 
 def allocate_storage_id(conn: sqlite3.Connection) -> str:
+    """Kullanılmayan sıradaki kimliği ayır; commit işlemini çağırana bırak."""
     cursor = conn.cursor()
     while True:
+        # UPDATE sayacı ilerletir; RETURNING - 1 aynı sorguda ayrılan eski değeri verir.
         row = cursor.execute(
             "UPDATE storage_id_counter SET next_value = next_value + 1 WHERE id = 1 RETURNING next_value - 1"
         ).fetchone()
@@ -231,6 +243,7 @@ def _backfill_missing_storage_ids(conn: sqlite3.Connection):
 
 
 def storage_id_for_hash(conn: sqlite3.Connection, file_hash: str) -> str | None:
+    """İçerik hash'ini dosya adlarında kullanılan kimliğe eşle; yoksa None ver."""
     row = conn.execute("SELECT storage_id FROM items WHERE hash = ?", (file_hash,)).fetchone()
     if not row:
         return None
@@ -255,6 +268,7 @@ def get_all_tiles(conn: sqlite3.Connection) -> list[tuple[str, int, str]]:
     return cursor.fetchall()
 
 def insert_tiles(conn: sqlite3.Connection, parent_hash: str, tiles: list[tuple[int, str]]):
+    """Boş olmayan parça listesini eskisinin yerine yaz; commit etme."""
 
     if not tiles:
         return
@@ -269,12 +283,14 @@ def insert_tiles(conn: sqlite3.Connection, parent_hash: str, tiles: list[tuple[i
     ''', [(parent_hash, index, phash) for index, phash in tiles])
 
 def get_all_video_signatures(conn: sqlite3.Connection) -> list[tuple[str, bytes, bytes]]:
+    """En az bir imzası bulunan videoların hash, ses ve görsel imzalarını getir."""
 
     cursor = conn.cursor()
     cursor.execute('SELECT hash, audio_hash, visual_embedding FROM items WHERE audio_hash IS NOT NULL OR visual_embedding IS NOT NULL')
     return cursor.fetchall()
 
 def reset_database(ctx: WorkspaceContext | None = None):
+    """Kasa kayıt tablolarını silip şemayı yeniden kur; medya dosyalarını silme."""
 
     target_path = _active_db_path(ctx)
     conn = sqlite3.connect(target_path, timeout=5)
@@ -310,6 +326,7 @@ def reset_database(ctx: WorkspaceContext | None = None):
         conn.close()
 
 def check_duplicate_url(conn: sqlite3.Connection, url: str) -> bool:
+    """Normalleştirilmiş kaynak URL'sinin kayıtlı olup olmadığını denetle."""
 
     if not url: return False
     cursor = conn.cursor()
@@ -317,6 +334,11 @@ def check_duplicate_url(conn: sqlite3.Connection, url: str) -> bool:
     return cursor.fetchone() is not None
 
 def insert_to_database(conn: sqlite3.Connection, filepath: Path, file_hash: str, mime_type: str, target_ext: str, metadata: dict = None, file_size: int = None, timestamp: datetime = None, phash: str = None, audio_hash: bytes = None, visual_embedding: bytes = None, width: int = None, height: int = None, storage_id: str = None) -> str:
+    """Medya satırını ekle ve dosya adlarında kullanılacak depolama kimliğini ver.
+
+    Gerekirse artist/platform sözlüğü çalışma alanı veritabanında çözülür
+    ve ayrı commit edilir. Kasa bağlantısındaki commit çağırana aittir.
+    """
     metadata = metadata or {}
     source_url = metadata.get('source_url', "")
     source_url_norm = normalize_source_url(source_url)

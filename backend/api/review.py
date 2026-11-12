@@ -201,6 +201,11 @@ async def review_action(filename: str, action: str, target_hash: str = None):
         return await asyncio.to_thread(_review_action_sync, filename, action, target_hash)
 
 def _review_action_sync(filename: str, action: str, target_hash: str = None):
+    """İnceleme dosyasını sil, ayrı kayıt olarak ekle veya bir kaydın yerine al.
+
+    Değiştirmede yeni medya eklenip elle düzenlenen alanlar taşınmadan eski
+    hedef silinmez. Temizlik hataları tamamlanmış aktarımı geri almaz.
+    """
     ctx = get_runtime_context()
     cfg = get_app_settings()
     if action not in {"delete", "variant", "replace"}:

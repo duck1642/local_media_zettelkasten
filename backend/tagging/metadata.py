@@ -4,6 +4,7 @@ LEGACY_CATEGORIES = {"general", "character", "rating"}
 
 
 def extra_groups(value) -> dict[str, list[str]]:
+    """Eski üç kategori dışındaki gruplardan benzersiz görünür etiket adlarını çıkar."""
     if not isinstance(value, dict):
         return {}
     groups = {}

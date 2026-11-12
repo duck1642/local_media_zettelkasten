@@ -75,6 +75,7 @@ def upsert_wd_dictionary_tags(conn: sqlite3.Connection, tags: list[tuple[str, st
 
 
 def backfill_workspace_metadata(conn: sqlite3.Connection, ctx: WorkspaceContext | None = None):
+    """Kasalardaki sanatçı, platform ve etiketleri ortak sözlüklere ekle; commit çağırana ait."""
     ensure_workspace_schema(conn)
     now = utc_now_str()
     _upsert_platform(conn, "Local")

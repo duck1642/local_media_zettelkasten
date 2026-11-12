@@ -1182,6 +1182,11 @@ def _delete_item_row_locked(
     ctx: WorkspaceContext | None,
     log_context: str = "system",
 ):
+    """Medya kilidi altında dosyaları geçici alana al, sonra SQLite kaydını sil.
+
+    Commit başarısızsa dosyalar eski yerlerine taşınmaya çalışılır.
+    Commit başarılıysa son temizlikte hata olsa bile kayıt silinmiş sayılır.
+    """
     cleanup_paths = _item_file_paths(item_hash, row[0] or "", row[1] or "", row[2], conn, ctx=ctx)
     previous_facet_values = item_facet_values(conn, item_hash)
     moved_paths, cleanup_errors = _stage_cleanup_paths(item_hash, cleanup_paths, trash_dir)
@@ -1291,6 +1296,7 @@ def _delete_item_sync(item_hash: str):
         conn.close()
 
 def _bulk_delete_items_sync(hashes: list[str]):
+    """Kayıtları aynı kasada tek tek sil ve RAM indeksini sonunda topluca güncelle."""
     unique_hashes = []
     seen = set()
     for value in hashes or []:
@@ -1333,6 +1339,7 @@ def _bulk_delete_items_sync(hashes: list[str]):
 
 @router.post("/api/items/{item_hash}/tag")
 async def trigger_tagging(item_hash: str):
+    """Medya etiketlerini yeniden üret; başarılıysa Markdown notunu ve indeksi yenile."""
     def sync_tagging():
         conn = init_database()
         cursor = conn.cursor()
@@ -1347,6 +1354,7 @@ async def trigger_tagging(item_hash: str):
                 raise HTTPException(status_code=404, detail="Asset missing")
 
             with storage_lifecycle_lock(row[2]):
+                # İlk okuma ile kilit alınması arasına silme işlemi girmiş olabilir.
                 current = cursor.execute("SELECT file_extension, mime_type, storage_id FROM items WHERE hash = ?", (item_hash,)).fetchone()
                 if not current or current[2] != row[2] or not asset_path.exists():
                     raise HTTPException(status_code=404, detail="Item was deleted before tagging")

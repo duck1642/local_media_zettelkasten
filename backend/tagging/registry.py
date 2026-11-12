@@ -32,12 +32,18 @@ _BACKENDS: dict[tuple, TaggerBackend] = {}
 
 
 def describe_models() -> list[dict]:
+    """Ayar ekranı için model listesini çıkarım kütüphanelerini yüklemeden ver."""
     return [
         dict(value, categories=list(value["thresholds"])) for value in MODEL_DESCRIPTORS.values()
     ]
 
 
 def resolve_model(config: dict) -> tuple[str, str, dict[str, float], dict]:
+    """Adaptör, model deposu, etkili eşikler ve çıktı profilini ayarlardan seç.
+
+    Adaptör bilgisi olmayan eski çağrılar WD kullanır. Profil eşikleri
+    model varsayılanlarının ve eski WD eşiğinin üzerine uygulanır.
+    """
     # Raw settings from older callers did not include a backend discriminator.
     backend = config.get("backend") or "wd"
     if backend not in MODEL_DESCRIPTORS:
@@ -57,6 +63,7 @@ def resolve_model(config: dict) -> tuple[str, str, dict[str, float], dict]:
 def get_backend(
     backend: str, model: str, device: str, models_dir: Path, local_path: str = ""
 ) -> TaggerBackend:
+    """Aynı ayarlarla modeli yeniden kullan; ayarlar değişirse eski modeli kapat."""
     key = (
         backend,
         model,

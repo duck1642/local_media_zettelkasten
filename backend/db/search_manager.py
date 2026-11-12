@@ -1,3 +1,4 @@
+"""SQLite kayıtlarının kasa başına RAM arama indekslerini yönetir."""
 
 import sqlite3
 import threading
@@ -43,6 +44,8 @@ def _rank_matches(distances, threshold: float, kind: str) -> list[tuple[str, flo
 
 @dataclass
 class _SearchIndexState:
+    """Tek SQLite dosyasına ait arama yapıları ve bunları koruyan kilit."""
+
     db_path: Path
     global_tree: BKTreeSearcher = field(default_factory=BKTreeSearcher)
     tile_tree: BKTreeSearcher = field(default_factory=BKTreeSearcher)
@@ -61,6 +64,7 @@ class SearchIndexUnavailableError(RuntimeError):
 
 
 class SearchManager:
+    """Süreçte tek örnek; her kasa için ayrı görsel, video, ses ve URL indeksi."""
 
     _instance = None
     _lock = threading.Lock()
@@ -91,6 +95,7 @@ class SearchManager:
         return None
 
     def _state_key(self, ctx: WorkspaceContext | None = None, conn: sqlite3.Connection | None = None) -> Path:
+        """İndeksi bağlamdan, bağlantıdan veya son çare olarak aktif kasadan seç."""
         if ctx is not None:
             return ctx.active_vault.db_path.resolve()
         if conn is not None:
@@ -109,11 +114,13 @@ class SearchManager:
             return state
 
     def reset(self, ctx: WorkspaceContext | None = None):
+        """Tek kasanın RAM indeksini at; SQLite kayıtlarını değiştirme."""
         key = self._state_key(ctx)
         with self._states_lock:
             self._states.pop(key, None)
 
     def reset_all(self):
+        """Süreçteki tüm RAM indekslerini at; kasaların dosyalarına dokunma."""
         with self._states_lock:
             self._states.clear()
 
@@ -150,6 +157,7 @@ class SearchManager:
         self._state_for().is_hydrated = bool(value)
 
     def hydrate(self, conn: sqlite3.Connection, ctx: WorkspaceContext | None = None):
+        """İndeksi verilen SQLite bağlantısından yükle; sağlıklı indeks varsa atla."""
         state = self._state_for(ctx, conn)
 
         with state.sync_lock:
@@ -158,6 +166,7 @@ class SearchManager:
             self._load_indexes_locked(state, conn)
 
     def _load_indexes_locked(self, state: _SearchIndexState, conn: sqlite3.Connection):
+        """Çağıran kasa kilidini tutarken yeni indeksi kur ve tamamlanınca yayınla."""
         log_system('INFO', "Hydrating RAM indexes from SQLite...")
         replacement = _SearchIndexState(state.db_path)
         urls = get_all_urls(conn)
@@ -190,12 +199,19 @@ class SearchManager:
         log_system('INFO', f"Hydration complete: {len(urls)} URLs | {len(phashes)} Images | {len(v_sigs)} Videos indexed in RAM.")
 
     def _ensure_indexes_locked(self, state: _SearchIndexState):
+        """Onarım gereken indeksi tek SQLite anlık görüntüsünden geri yükle.
+
+        Okuma başarısızsa eski indeksi kullandırmak yerine
+        SearchIndexUnavailableError yükseltir.
+        """
         if not state.needs_recovery:
             return
         try:
             # Read one SQLite snapshot across all indexes without creating a DB
             # or consulting whichever vault is active when recovery runs.
             with closing(self._open_read_db(state)) as conn:
+                # Salt okunur bağlantıda da BEGIN gerekli: ayrı SELECT'ler,
+                # araya başka bir commit girse bile aynı veri sürümünü görsün.
                 conn.execute("BEGIN")
                 self._load_indexes_locked(state, conn)
         except Exception as exc:
@@ -207,6 +223,11 @@ class SearchManager:
         return sqlite3.connect(f"{state.db_path.as_uri()}?mode=ro", uri=True)
 
     def _recover_after_write_locked(self, state: _SearchIndexState, error: Exception | None = None):
+        """Commit sonrası RAM yazımı aksarsa kasayı hemen SQLite'tan yüklemeyi dene.
+
+        Başarısız onarım indeksi onarım bekler halde bırakır. SQLite işlemi
+        geri alınmaz; bir sonraki sorgu veya güncelleme onarımı tekrar dener.
+        """
         # These deltas follow a successful SQLite commit. RAM failure must not
         # undo it or interrupt unrelated file cleanup.
         state.needs_recovery = True
@@ -218,6 +239,7 @@ class SearchManager:
             log_system("ERROR", "RAM index recovery failed", db_path=str(state.db_path), error=str(exc.__cause__))
 
     def query_image(self, phash: str, threshold: int = 5, ctx: WorkspaceContext | None = None) -> List[Tuple[str, int, str]]:
+        """Görselin hash'ini tüm görseller ve kayıtlı görsel parçalarıyla karşılaştır."""
         state = self._state_for(ctx)
 
         with state.sync_lock:
@@ -236,6 +258,12 @@ class SearchManager:
         return results
 
     def query_video(self, audio_hash: bytes, visual_embedding: bytes, ai_threshold: float = 0.08, audio_threshold: float = 0.85, ctx: WorkspaceContext | None = None) -> List[Tuple[str, float, str]]:
+        """Kasanın ses ve görsel imzalarını kilidi tutmadan tam taramayla karşılaştır.
+
+        İmzalar önce kilit altında kopyalanır. Sonuçlar (hash, benzerlik, tür)
+        üçlüleridir; ses grubu önce gelir. Görsel eşik uzaklık üst sınırı,
+        ses eşiği ise benzerlik alt sınırıdır.
+        """
         state = self._state_for(ctx)
 
         with state.sync_lock:
@@ -269,6 +297,7 @@ class SearchManager:
             return state.global_tree.query(phash, threshold)
 
     def update_indexes(self, file_hash: str, phash: Optional[str], url: Optional[str], tiles: List[Tuple[int, str]] = None, audio_hash: bytes = None, visual_embedding: bytes = None, ctx: WorkspaceContext | None = None, *, conn: sqlite3.Connection | None = None):
+        """Commit edilmiş kaydın imzalarını ekle; bağlantı verilirse satırın hâlâ var olduğunu doğrula."""
         state = self._state_for(ctx, conn)
 
         with state.sync_lock:
@@ -283,6 +312,7 @@ class SearchManager:
                 self._recover_after_write_locked(state, exc)
 
     def update_indexes_batch(self, items: list[dict], ctx: WorkspaceContext | None = None):
+        """Bekleyen eklemeleri tek kilitle yayınla; SQLite'tan silinmiş kayıtları atla."""
 
         if not items:
             return
@@ -319,6 +349,11 @@ class SearchManager:
             log_system("INFO", "RAM index batch update queued", count=len(items))
 
     def remove_indexes_batch(self, items: list[dict], ctx: WorkspaceContext | None = None):
+        """SQLite'tan silinmiş kayıtların imzalarını ve URL'lerini RAM'den kaldır.
+
+        Normal akışta silinen imzaların sayısını döndürür. Onarım yoluna
+        girildiyse bu sayaç sıfırdır; yeniden yüklemenin sonucunu ölçmez.
+        """
 
         hashes = {str(item.get("hash") or item.get("file_hash") or "").strip() for item in items or []}
         hashes.discard("")

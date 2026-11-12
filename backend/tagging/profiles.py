@@ -11,6 +11,7 @@ def score_key(tag: dict) -> float:
 
 
 def limit_predictions(predictions: list[Prediction], limit: int) -> list[Prediction]:
+    """Her kaynak kategoride en yüksek skorlu tahminleri belirtilen sayıyla sınırla."""
     categories = defaultdict(list)
     for prediction in predictions:
         categories[prediction.category].append(prediction)
@@ -24,6 +25,11 @@ def limit_predictions(predictions: list[Prediction], limit: int) -> list[Predict
 def apply_profile(
     predictions: list[Prediction], profile: dict, max_tags: int
 ) -> dict[str, list[dict]]:
+    """Kategori ve etiket adlarını eşle; aynı hedef etikette en iyi skoru tut.
+
+    Hedefi None olan kategori gösterilmez. Kaynak ad ve kategori, görünen
+    etiket yeniden adlandırılsa bile sonuçta korunur.
+    """
     category_map = profile.get("category_map") or {}
     label_map = profile.get("label_map") or {}
     grouped = defaultdict(dict)
@@ -53,6 +59,7 @@ def apply_profile(
 
 
 def legacy_fields(groups: dict[str, list[dict]]) -> tuple[dict | None, list[dict], list[dict]]:
+    """Yeni gruplardan eski rating, karakter ve genel etiket alanlarını çıkar."""
     ratings = groups.get("rating") or []
     rating = dict(ratings[0]) if ratings else None
     if rating:

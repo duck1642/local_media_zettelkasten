@@ -335,6 +335,11 @@ def rename_vault(vault_id: str, name: str, ctx: WorkspaceContext | None = None) 
 
 
 def set_active_vault(vault_id: str, ctx: WorkspaceContext | None = None) -> dict:
+    """Yeni kasayı doğrula ve servisleri yükle; ancak sonra aktif seçimi kaydet.
+
+    Geçiş başarısız olursa önceki çalışma bağlamı ve yapılandırma geri
+    yüklenmeye çalışılır.
+    """
     runtime = _ctx(ctx)
     with _vault_transition():
         snapshot = _capture_transition_snapshot(runtime)
@@ -433,6 +438,11 @@ def _rename_import_stage(stage_root: Path, final_root: Path) -> None:
 
 
 def delete_vault(vault_id: str, confirm: bool = False, ctx: WorkspaceContext | None = None) -> dict:
+    """Aktif olmayan kasayı kaldır; dolu kasa için açık onay iste.
+
+    Dizin önce taşınır, kayıt defteri güncellendikten sonra silinir.
+    Son temizlik tamamlanamazsa geçici dizin yolu yanıtta bildirilir.
+    """
     runtime = _ctx(ctx)
     with _vault_transition():
         snapshot = _capture_transition_snapshot(runtime)
@@ -1206,6 +1216,7 @@ def repair_vault(vault_id: str, actions: list[str] | None = None, confirm_destru
 
 
 def backup_vault(vault_id: str, ctx: WorkspaceContext | None = None, confirm: bool = False) -> dict:
+    """Kasanın dosyalarını ve SQLite anlık kopyasını geri yüklenebilir ZIP'e yaz."""
     if not confirm:
         raise ValueError("backup requires confirmation")
     runtime = _ctx(ctx)
@@ -1225,6 +1236,7 @@ def backup_vault(vault_id: str, ctx: WorkspaceContext | None = None, confirm: bo
         snapshot_dir = Path(tempfile.mkdtemp(prefix="lmz-backup-db-"))
         snapshot_db = snapshot_dir / "lmz_main.db"
         try:
+            # WAL/SHM dosyalarını arşivleme; SQLite kopyası geçerli DB durumunu içerir.
             db_sidecars = {db_path.resolve(), Path(f"{db_path}-wal").resolve(), Path(f"{db_path}-shm").resolve()}
             payload_files = [path for path in _packaged_files(root, root.rglob("*")) if path.resolve() not in db_sidecars]
             include_db = db_path.exists()
@@ -1477,6 +1489,11 @@ def import_vault_package(
     confirm: bool = False,
     ctx: WorkspaceContext | None = None,
 ) -> dict:
+    """Önizlemedeki paket doğrulanırsa dışa aktarımı yeni bir kasa olarak kaydet.
+
+    Arşiv geçici dizine açılır. Kasa son konumuna taşınıp ayarlara
+    kaydedilmeden mevcut kasalara dokunulmaz.
+    """
     if not confirm:
         raise ValueError("import requires confirmation")
     if not str(package_fingerprint_value or "").strip():
@@ -1530,6 +1547,7 @@ def restore_backup_package(
     confirm: bool = False,
     ctx: WorkspaceContext | None = None,
 ) -> dict:
+    """Yedeği mevcut kasanın üstüne yazmadan benzersiz adlı yeni kasaya aç."""
     if not confirm:
         raise ValueError("restore requires confirmation")
     if not str(package_fingerprint_value or "").strip():

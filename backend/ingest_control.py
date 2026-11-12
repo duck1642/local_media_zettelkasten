@@ -1,3 +1,5 @@
+"""Aktarımların RAM'deki durumunu ve durdurma sinyallerini kasa bazında saklar."""
+
 import threading
 from pathlib import Path
 
@@ -28,10 +30,12 @@ def _event_for(store: dict[Path, threading.Event], ctx: WorkspaceContext | None 
 
 
 def online_stop_event(ctx: WorkspaceContext | None = None) -> threading.Event:
+    """Kasanın çevrimiçi aktarım işçisine ait durdurma sinyalini al."""
     return _event_for(_online_stop_events, ctx)
 
 
 def local_stop_event(ctx: WorkspaceContext | None = None) -> threading.Event:
+    """Kasanın yerel aktarım işçisine ait durdurma sinyalini al."""
     return _event_for(_local_stop_events, ctx)
 
 
@@ -67,6 +71,7 @@ def local_ingest_state(ctx: WorkspaceContext | None = None) -> dict:
 
 
 def local_ingest_lock(ctx: WorkspaceContext | None = None) -> threading.Lock:
+    """Yerel aktarımın sayaçlarını ve sonuç listesini koruyan kasa kilidini al."""
     key = _ctx_key(ctx)
     with _local_ingest_state_lock:
         lock = _local_ingest_locks.get(key)
@@ -77,6 +82,7 @@ def local_ingest_lock(ctx: WorkspaceContext | None = None) -> threading.Lock:
 
 
 def reset_local_ingest_state(ctx: WorkspaceContext | None = None) -> None:
+    """Yerel aktarım durumunu boşalt ve ona ait durdurma sinyalini temizle."""
     key = _ctx_key(ctx)
     with _local_ingest_state_lock:
         _local_ingest_states[key] = _new_local_ingest_state()
@@ -84,5 +90,6 @@ def reset_local_ingest_state(ctx: WorkspaceContext | None = None) -> None:
 
 
 def clear_stop_flags(ctx: WorkspaceContext | None = None):
+    """Aynı kasanın yerel ve çevrimiçi durdurma sinyallerini sıfırla."""
     online_stop_event(ctx).clear()
     local_stop_event(ctx).clear()

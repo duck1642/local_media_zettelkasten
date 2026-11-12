@@ -1,3 +1,5 @@
+"""Kasa seçimine bağlı olmayan uygulama ayarları ve etiketleme modeli listesi."""
+
 import asyncio
 
 from app_paths import get_app_paths
@@ -35,6 +37,7 @@ def _read_settings_sync() -> tuple[AppSettings, str]:
 
 @router.get("/api/app/settings", response_model=AppSettings)
 async def get_app_settings(response: Response):
+    """Uygulama ayarlarını ve sonraki yazmada kullanılacak ETag sürümünü döndür."""
     settings, etag = await asyncio.to_thread(_read_settings_sync)
     response.headers["ETag"] = _quoted_etag(etag)
     return settings
@@ -42,12 +45,14 @@ async def get_app_settings(response: Response):
 
 @router.get("/api/tagging/models")
 async def get_tagging_models():
+    """Ayar ekranı için model listesini, modelleri belleğe yüklemeden döndür."""
     from tagging.registry import describe_models
 
     return describe_models()
 
 
 def _replace_settings_sync(settings: AppSettings, expected_etag: str):
+    """Ayarı yalnızca istemcinin okuduğu sürüm güncelse yaz; sonra logları yenile."""
     try:
         updated = _repository().replace(settings, expected_etag=_unquote_etag(expected_etag))
         try:
@@ -72,6 +77,7 @@ async def put_app_settings(
     response: Response,
     if_match: str = Header(..., alias="If-Match"),
 ):
+    """Ayarların tamamını If-Match sürümü doğrulanırsa değiştir ve yeni ETag'i döndür."""
     updated = await asyncio.to_thread(_replace_settings_sync, settings, if_match)
     response.headers["ETag"] = _quoted_etag(updated.etag)
     return updated.value

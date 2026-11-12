@@ -1,7 +1,10 @@
+"""Kasa köklerini ve çalışma alanına göre yazılan yapılandırma yollarını doğrular."""
+
 from pathlib import Path
 
 
 def is_relative_to(path: Path, root: Path) -> bool:
+    """Bağlantılar çözüldükten sonra yolun kökün içinde veya kökün kendisi olduğunu denetle."""
     try:
         path.resolve().relative_to(root.resolve())
         return True
@@ -10,6 +13,7 @@ def is_relative_to(path: Path, root: Path) -> bool:
 
 
 def workspace_relative_path(path: str | Path, workspace_root: Path, *, label: str, allow_equal: bool = False) -> str:
+    """Yolu yapılandırmada saklanabilecek göreli biçime çevir; dışarı çıkarsa hata ver."""
     resolved = Path(path).expanduser().resolve()
     root = workspace_root.resolve()
     if not is_relative_to(resolved, root):
@@ -37,6 +41,7 @@ def _validate_relative_value(value: object, workspace_root: Path, label: str) ->
 
 
 def validate_vault_root_value(value: object, workspace_root: Path, label: str) -> Path:
+    """Göreli kasa kökünü çözümle; çalışma alanının kendisini ve ayrılmış dizinleri reddet."""
     resolved = _validate_relative_value(value, workspace_root, label)
     root = workspace_root.resolve()
     if resolved == root:
@@ -54,6 +59,7 @@ def validate_vault_root_value(value: object, workspace_root: Path, label: str) -
 
 
 def validate_workspace_config_paths(config: dict, workspace_root: Path):
+    """Kasa yollarını ve artık desteklenmeyen model/gizli veri ayarlarını denetle."""
     paths = config.get("paths")
     if isinstance(paths, dict):
         if "models" in paths:
@@ -69,12 +75,14 @@ def validate_workspace_config_paths(config: dict, workspace_root: Path):
 
 
 def vault_root_is_usable(root: Path, workspace_root: Path) -> bool:
+    """Kökün yol kurallarına uyduğunu ve diskte bulunduğunu denetle."""
     if not vault_root_is_inside_workspace(root, workspace_root):
         return False
     return root.exists()
 
 
 def vault_root_is_inside_workspace(root: Path, workspace_root: Path) -> bool:
+    """Kökün varlığını değil, çalışma alanı içindeki geçerli konumunu denetle."""
     try:
         validate_vault_root_value(workspace_relative_path(root, workspace_root, label="vault root"), workspace_root, "vault root")
     except ValueError:

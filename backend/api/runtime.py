@@ -673,6 +673,11 @@ async def load_workspace(workspace_id: str):
 
 
 def _load_workspace_sync(workspace_id: str):
+    """Kayıtlı çalışma alanına geç; başarısız etkinleştirmede eski durumu geri yüklemeyi dene.
+
+    Eksik yapılandırma veya kasa yolu için istemciye hangi konumu düzeltmesi
+    gerektiğini bildiren ayrı bir durum döndürür.
+    """
     from workspaces import (
         DEFAULT_WORKSPACE_ID,
         _resolve,

@@ -1,3 +1,5 @@
+"""Kasa işlemlerinden önce gerekli çalışma alanı ve yol koşullarını denetler."""
+
 from fastapi import HTTPException
 from path_policy import vault_root_is_usable
 from runtime_activation import active_vault_is_usable
@@ -10,18 +12,21 @@ from runtime_context import (
 
 
 def require_workspace_context() -> WorkspaceContext:
+    """Yüklü bağlamı al; çalışma alanı yoksa API'ye 503 olarak bildir."""
     try:
         return get_runtime_context()
     except RuntimeNotLoadedError as exc:
         raise HTTPException(status_code=503, detail="Workspace not loaded") from exc
 
 def require_usable_vault_context() -> VaultContext:
+    """Aktif kasanın bağlamını yalnızca kökü kullanılabilir durumdaysa ver."""
     ctx = require_workspace_context()
     if not active_vault_is_usable(ctx):
         raise HTTPException(status_code=503, detail="Active vault is offline or missing")
     return ctx.active_vault
 
 def require_usable_target_vault_context(vault_id: str) -> VaultContext:
+    """Aktif kasayı değiştirmeden hedefi çöz; bilinmeyen veya çevrimdışı kasayı reddet."""
     ctx = require_workspace_context()
 
     from vaults import get_vault_context

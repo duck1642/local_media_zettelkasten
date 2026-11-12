@@ -1,3 +1,5 @@
+"""FastAPI uygulamasını kurar; başlangıç, istek denetimi ve router'ları bağlar."""
+
 import asyncio
 import os
 from contextlib import asynccontextmanager
@@ -59,6 +61,7 @@ PRE_RUNTIME_WORKSPACE_LOAD_PREFIXES = (
 
 # Baştaki `_`, adın iç kullanım için olduğunu belirtir; Python gizliliği zorunlu kılmaz.
 def _is_pre_runtime_path(path: str) -> bool:
+    """Çalışma alanı yüklenmeden önce kullanılmasına izin verilen yolu tanı."""
     pre_runtime_paths = PRE_RUNTIME_PUBLIC_PATHS | PRE_RUNTIME_LOG_PATHS | PRE_RUNTIME_WORKSPACE_PATHS
     if path in pre_runtime_paths:
         return True
@@ -66,6 +69,7 @@ def _is_pre_runtime_path(path: str) -> bool:
 
 
 def _load_env_workspace_if_requested():
+    """Ortamda belirtilen çalışma alanını yüklemeyi dene; hata olursa logla."""
     env_path = os.environ.get("LMZ_CONFIG_PATH")
     if not env_path or has_runtime_context():
         return
@@ -91,12 +95,14 @@ async def startup_env_workspace():
 # to_thread bloklayan işi ayrı iş parçacığına taşır.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """API başlarken veri alanını ve logları hazırla, kapanırken servisleri durdur."""
     await asyncio.to_thread(bootstrap_data_home, get_app_paths())
     reconfigure_logging()
     configure_terminal_logging()
     await startup_env_workspace()
     await startup_auth_scan()
     try:
+        # yield'e kadar başlangıç, sonrasında FastAPI kapanırken finally çalışır.
         yield
     finally:
         await asyncio.to_thread(stop_metadata_watchdog)
@@ -132,6 +138,11 @@ app.add_middleware(
 
 @app.middleware("http")
 async def local_api_guard(request: Request, call_next):
+    """Yazma isteklerinde anahtar/origin kontrolü ve çalışma alanı kapısı uygula.
+
+    Çalışma alanı yüklenmeden önce yalnızca başlatıcı için gereken yollar
+    açık kalır; diğer normal istekler 503 alır.
+    """
     configure_terminal_logging()
     if not has_runtime_context() and os.environ.get("LMZ_CONFIG_PATH"):
         await asyncio.to_thread(_load_env_workspace_if_requested)

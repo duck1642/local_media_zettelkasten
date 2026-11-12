@@ -1,3 +1,5 @@
+"""Hazırlanmış çalışma alanı bağlamını log, arama ve metadata servislerine bağlar."""
+
 from pathlib import Path
 
 from path_policy import vault_root_is_usable
@@ -5,10 +7,17 @@ from runtime_context import WorkspaceContext, set_runtime_context
 
 
 def active_vault_is_usable(ctx: WorkspaceContext) -> bool:
+    """Kasa kökünün mevcut bağlamla dosya işlemlerine uygun olup olmadığını denetle."""
     return bool(ctx and ctx.active_vault and vault_root_is_usable(Path(ctx.active_vault.root), ctx.root))
 
 
 def activate_runtime_context(ctx: WorkspaceContext, *, hydrate: bool = True) -> dict:
+    """Bağlamı yayınla ve log hedeflerini yeni kasaya bağla.
+
+    Kasa kullanılamıyorsa arama indeksini yüklemeden recovery sonucu döner.
+    hydrate etkinse RAM indeksi SQLite'tan doldurulur, metadata izleyicisi
+    yeniden başlatılır ve bir onarım çalışması başlatılmaya çalışılır.
+    """
     set_runtime_context(ctx)
 
     from logger import log_system, reconfigure_logging

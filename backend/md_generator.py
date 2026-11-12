@@ -30,6 +30,12 @@ def _format_date_added(date_added) -> str:
 
 
 def generate_markdown(conn: sqlite3.Connection, file_hash: str, asset_rel_path: str | None = None, title: str = "", topics_override: list | None = None, manual_overrides: dict | None = None, force_wd_from_cache: bool = False) -> str:
+    """SQLite kaydı, mevcut not ve etiket önbelleğinden Markdown metni üret.
+
+    Notu diske yazmaz. Normalde mevcut elle düzenlenen alanlar korunur;
+    force_wd_from_cache etiketleri yeni tahminlerle yeniler. Kayıt yoksa
+    boş metin döner.
+    """
 
     cursor = conn.cursor()
     cursor.execute('''

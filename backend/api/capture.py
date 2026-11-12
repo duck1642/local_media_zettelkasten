@@ -268,6 +268,7 @@ async def commit_capture(body: CaptureCommitRequest):
 
 
 def _commit_capture_sync(body: CaptureCommitRequest) -> dict:
+    """Aynı yakalama için ikinci aktarımı engelle; başarı kaydı varsa onu döndür."""
     ctx = get_runtime_context()
     staged_id = _validate_staged_id(body.staged_id)
     handled = _load_handled_capture(staged_id, ctx)
@@ -278,6 +279,7 @@ def _commit_capture_sync(body: CaptureCommitRequest) -> dict:
     if not commit_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Capture is already committing")
     try:
+        # İlk kontrol ile kilidi alma arasında başka bir istek aktarımı bitirmiş olabilir.
         handled = _load_handled_capture(staged_id, ctx)
         if handled:
             return handled
@@ -287,6 +289,7 @@ def _commit_capture_sync(body: CaptureCommitRequest) -> dict:
 
 
 def _commit_capture_locked(body: CaptureCommitRequest, staged_id: str, ctx: WorkspaceContext) -> dict:
+    """Geçici kopyayı aktar; sonuç aktarım, karantina veya kopyaysa staging alanını temizle."""
     sidecar = _load_sidecar(staged_id, ctx)
     staged_path = _staged_file_from_sidecar(sidecar, ctx)
     file_hash = calculate_file_hash(staged_path)

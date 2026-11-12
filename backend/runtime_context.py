@@ -1,3 +1,5 @@
+"""Çalışma alanı ile aktif kasanın yollarını tek bir bağlamda toplar."""
+
 import os
 import threading
 from dataclasses import dataclass
@@ -16,8 +18,12 @@ else:
     PROJECT_ROOT = SRC_DIR.parent
 
 
+# frozen=True, oluşturulan bağlamın alanlarına sonradan atama yapılmasını önler.
+# Kasa değiştirirken mevcut nesneyi parça parça değiştirmek yerine yenisi yayınlanır.
 @dataclass(frozen=True)
 class VaultContext:
+    """Bir kasaya özel dosya, veritabanı, önbellek ve kuyruk yolları."""
+
     id: str
     name: str
     root: Path
@@ -38,6 +44,8 @@ class VaultContext:
 
 @dataclass(frozen=True)
 class WorkspaceContext:
+    """Çalışma alanının ortak yolları ve o anda seçili kasanın bağlamı."""
+
     config_path: Path
     root: Path
     topics_dir: Path
@@ -52,6 +60,8 @@ _RUNTIME_CONTEXT: WorkspaceContext | None = None
 
 
 class RuntimeNotLoadedError(RuntimeError):
+    """Henüz bir çalışma alanı seçilmeden kasa bağlamı istendi."""
+
     pass
 
 
@@ -61,6 +71,7 @@ def _slug_vault_id(value: str) -> str:
 
 
 def _resolve_config_path(config_path: str | Path | None = None) -> Path:
+    """Önce açıkça verilen yolu, sonra ortam ayarını, en son kayıt defterini kullan."""
     data_root = get_app_paths().data_root
     if config_path is not None:
         candidate = Path(config_path).expanduser()
@@ -90,6 +101,7 @@ def _resolve_from_root(root: Path, path_str: str | Path) -> Path:
 
 
 def build_vault_context(vault_id: str, name: str, vault_root: Path) -> VaultContext:
+    """Kasa yollarını hesapla; klasör oluşturma veya aktif kasayı değiştirme."""
     vault_dir = vault_root / "vault"
     return VaultContext(
         id=vault_id,
@@ -112,6 +124,11 @@ def build_vault_context(vault_id: str, name: str, vault_root: Path) -> VaultCont
 
 
 def build_runtime_context(config_path: str | Path | None = None, active_vault_id: str | None = None) -> WorkspaceContext:
+    """Ayarları oku ve çalışma alanı dışına çıkmayan bir kasa bağlamı kur.
+
+    Kasa kimliği verilmezse ayarlardaki aktif kasa kullanılır. Bu işlev
+    bağlamı sadece hazırlar; çalışan servisleri veya süreç durumunu değiştirmez.
+    """
     resolved_config_path = _resolve_config_path(config_path)
     root = _config_root_for(resolved_config_path)
     config = _load_config(resolved_config_path)
@@ -142,17 +159,20 @@ def has_runtime_context() -> bool:
 
 
 def try_get_runtime_context() -> WorkspaceContext | None:
+    """Bağlamı döndür; henüz yüklenmediyse yeni bir bağlam oluşturmadan None ver."""
     with _CONTEXT_LOCK:
         return _RUNTIME_CONTEXT
 
 
 def clear_runtime_context():
+    """Süreçteki bağlam referansını kaldır; kasa dosyalarına dokunma."""
     global _RUNTIME_CONTEXT
     with _CONTEXT_LOCK:
         _RUNTIME_CONTEXT = None
 
 
 def set_runtime_context(ctx: WorkspaceContext) -> WorkspaceContext:
+    """Hazır bağlamı süreç genelinde yayınla; bağlı servisleri yeniden başlatma."""
     global _RUNTIME_CONTEXT
     with _CONTEXT_LOCK:
         _RUNTIME_CONTEXT = ctx
@@ -160,6 +180,11 @@ def set_runtime_context(ctx: WorkspaceContext) -> WorkspaceContext:
 
 
 def get_runtime_context() -> WorkspaceContext:
+    """Bağlamı döndür veya LMZ_CONFIG_PATH varsa ilk erişimde yükle.
+
+    Çalışma alanı seçilmemiş ve ortamda yol verilmemişse RuntimeNotLoadedError
+    yükselir. Yüklemeyi tetiklememek için try_get_runtime_context kullanılır.
+    """
     global _RUNTIME_CONTEXT
     with _CONTEXT_LOCK:
         if _RUNTIME_CONTEXT is None:
@@ -172,6 +197,7 @@ def get_runtime_context() -> WorkspaceContext:
 
 
 def reload_runtime_context(config_path: str | Path | None = None, active_vault_id: str | None = None) -> WorkspaceContext:
+    """Ayarları yeniden okuyup süreç bağlamını değiştir; servisleri etkinleştirme."""
     global _RUNTIME_CONTEXT
     with _CONTEXT_LOCK:
         _RUNTIME_CONTEXT = build_runtime_context(config_path, active_vault_id=active_vault_id)

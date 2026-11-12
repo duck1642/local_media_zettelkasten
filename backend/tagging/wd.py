@@ -10,6 +10,8 @@ from tagging.contracts import Prediction
 
 
 class WdTagger:
+    """WD ONNX modelini, CUDA kullanılamazsa CPU'ya düşebilecek şekilde çalıştırır."""
+
     def __init__(self, model: str, device: str, models_dir: Path, local_path: str = ""):
         import onnxruntime as ort
         from huggingface_hub import hf_hub_download
@@ -36,6 +38,7 @@ class WdTagger:
         return self._warning
 
     def predict(self, image: Image.Image, thresholds: dict[str, float]) -> list[Prediction]:
+        """Görseli etiketle; çalışma sağlayıcısı değişirse bunu uyarı olarak sakla."""
         before = self.provider
         result = _predict_image_tags(
             self.session, self.input_meta, self.output_meta, self.labels, image, thresholds
@@ -49,6 +52,7 @@ class WdTagger:
 
 
 def _ensure_model_files(model_repo: str, download, models_dir: Path, local_path: str = ""):
+    """ONNX ve CSV yollarını seç; açıkça verilen yerel dizinde eksik dosyayı indirme."""
     if local_path:
         model_dir = Path(local_path).expanduser().resolve()
         if not all((model_dir / name).is_file() for name in ("model.onnx", "selected_tags.csv")):
@@ -109,6 +113,7 @@ def _predict_image_tags(session, input_meta, output_meta, labels, image, thresho
 
 
 def _prepare_pil_image(image: Image.Image, input_shape) -> np.ndarray:
+    """Şeffaflığı beyaza birleştir, kareye tamamla ve ONNX için BGR tensörü oluştur."""
     target_size = next(
         (value for value in reversed(input_shape) if isinstance(value, int) and value > 3), 448
     )
