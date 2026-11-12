@@ -662,6 +662,7 @@
       width={inspectorWidth}
       on:close={clearSelection}
       on:updated={handleUpdate}
+      on:tagged={() => fetchItems()}
       on:focus={handleFocusMode}
       on:changeItem={(event) => setSingleSelection(event.detail)}
       on:deleted={() => { clearSelection(); fetchItems(); }}

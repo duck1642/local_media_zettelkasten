@@ -42,6 +42,8 @@
   let draftWdCharacters: string[] = [];
   let savedWdGeneral: string[] = [];
   let draftWdGeneral: string[] = [];
+  let savedWdGroups: Record<string, string[]> = {};
+  let draftWdGroups: Record<string, string[]> = {};
   let isDirty = false;
   let loadingTimeout: any = null;
   let showLoadingIndicator = false;
@@ -141,7 +143,8 @@
   $: metadataDirty = !sameStringList(draftTopics, savedTopics)
     || draftWdRating !== savedWdRating
     || !sameStringList(draftWdCharacters, savedWdCharacters)
-    || !sameStringList(draftWdGeneral, savedWdGeneral);
+    || !sameStringList(draftWdGeneral, savedWdGeneral)
+    || JSON.stringify(draftWdGroups) !== JSON.stringify(savedWdGroups);
   $: isDirty = Boolean(fullItem && (artist !== savedArtist || metadataDirty));
 
   async function loadFullDetails(hash: string) {
@@ -225,6 +228,8 @@
     draftWdCharacters = [];
     savedWdGeneral = [];
     draftWdGeneral = [];
+    savedWdGroups = {};
+    draftWdGroups = {};
     tagging = false;
     lastLoadedHash = null;
   }
@@ -248,6 +253,8 @@
     draftWdCharacters = [...savedWdCharacters];
     savedWdGeneral = normalizeList(detail.wd_tags?.general || []);
     draftWdGeneral = [...savedWdGeneral];
+    savedWdGroups = Object.fromEntries(Object.entries(detail.wd_tags?.groups || {}).map(([category, tags]) => [category, normalizeList(tags)]));
+    draftWdGroups = JSON.parse(JSON.stringify(savedWdGroups));
   }
 
   function countFor(map: Record<string, number> | undefined, value: string) {
@@ -423,7 +430,7 @@
     draftTopics = draftTopics.filter((topic) => topic.toLocaleLowerCase() !== key);
   }
 
-  function removeDraftWdTag(kind: 'rating' | 'character' | 'general', value: string) {
+  function removeDraftWdTag(kind: string, value: string) {
     const key = String(value || '').trim().toLocaleLowerCase();
     if (kind === 'rating' && draftWdRating.toLocaleLowerCase() === key) {
       draftWdRating = '';
@@ -431,6 +438,8 @@
       draftWdCharacters = draftWdCharacters.filter((tag) => tag.toLocaleLowerCase() !== key);
     } else if (kind === 'general') {
       draftWdGeneral = draftWdGeneral.filter((tag) => tag.toLocaleLowerCase() !== key);
+    } else if (draftWdGroups[kind]) {
+      draftWdGroups = { ...draftWdGroups, [kind]: draftWdGroups[kind].filter((tag) => tag.toLocaleLowerCase() !== key) };
     }
   }
 
@@ -461,7 +470,8 @@
       topics: [...draftTopics],
       wdRating: draftWdRating,
       wdCharacters: [...draftWdCharacters],
-      wdGeneral: [...draftWdGeneral]
+      wdGeneral: [...draftWdGeneral],
+      wdGroups: JSON.parse(JSON.stringify(draftWdGroups)) as Record<string, string[]>,
     };
     try {
       const res = await apiFetch(`/api/items/${item.hash}`, {
@@ -472,7 +482,8 @@
           topics: savedSnapshot.topics,
           wd_rating: savedSnapshot.wdRating,
           wd_character_tags: savedSnapshot.wdCharacters,
-          wd_tags: savedSnapshot.wdGeneral
+          wd_tags: savedSnapshot.wdGeneral,
+          tag_groups: savedSnapshot.wdGroups,
         })
       });
       if (!res.ok) throw new Error('Failed to save');
@@ -488,6 +499,8 @@
       draftWdCharacters = [...savedSnapshot.wdCharacters];
       savedWdGeneral = [...savedSnapshot.wdGeneral];
       draftWdGeneral = [...savedSnapshot.wdGeneral];
+      savedWdGroups = savedSnapshot.wdGroups;
+      draftWdGroups = JSON.parse(JSON.stringify(savedWdGroups));
       if (fullItem) {
         fullItem = {
           ...fullItem,
@@ -497,7 +510,8 @@
             ...(fullItem.wd_tags || {}),
             rating: savedSnapshot.wdRating || 'None',
             characters: [...savedSnapshot.wdCharacters],
-            general: [...savedSnapshot.wdGeneral]
+            general: [...savedSnapshot.wdGeneral],
+            groups: savedSnapshot.wdGroups,
           }
         };
       }
@@ -514,21 +528,24 @@
 
   async function runTagging() {
       if (!item || tagging) return;
+      const hash = item.hash;
+      const session = currentRuntimeSessionKey;
       tagging = true;
-      uiLog('INFO', `Manual tagging started for ${item.hash.substring(0, 12)}`);
+      uiLog('INFO', `Manual tagging started for ${hash.substring(0, 12)}`);
       try {
-          const res = await apiFetch(`/api/items/${item.hash}/tag`, { method: 'POST' });
+          const res = await apiFetch(`/api/items/${hash}/tag`, { method: 'POST' });
           if (!res.ok) {
               const err = await res.json();
               throw new Error(err.detail || 'Tagging failed');
           }
-          fullItem = await res.json();
-          applyLoadedDetails(fullItem);
-          uiLog('INFO', `Tagging complete for ${item.hash.substring(0, 12)}`);
-          
-          // Dispatch global refresh events after automatic tagging updates the database
+          const detail = await res.json();
+          uiLog('INFO', `Tagging complete for ${hash.substring(0, 12)}`);
+          if (currentRuntimeSessionKey !== session) return;
+          if (item?.hash === hash) applyLoadedDetails(detail);
+
+          // Refresh the list without clearing the selection that shows the new tags.
+          dispatch('tagged');
           window.dispatchEvent(new CustomEvent('lmz:refresh', { detail: { tab: 'stats' } }));
-          window.dispatchEvent(new CustomEvent('lmz:refresh', { detail: { tab: 'vault' } }));
       } catch (e) {
           uiLog('ERROR', 'Tagging failed', { error: String(e) });
           alert(`Tagging failed: ${e}`);
@@ -726,6 +743,7 @@
           rating={draftWdRating}
           characters={draftWdCharacters}
           general={draftWdGeneral}
+          groups={draftWdGroups}
           wdTagCounts={fullItem.wd_tag_counts}
           {draftTopics}
           {savedTopics}

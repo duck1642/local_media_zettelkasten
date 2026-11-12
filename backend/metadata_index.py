@@ -12,6 +12,7 @@ from logger import log_system
 from md_generator import normalize_topic_list
 from topics import parse_topic_values
 from tagging import load_tag_cache
+from tagging.metadata import extra_groups
 from runtime_context import WorkspaceContext, get_runtime_context
 from utils import note_path_for, wd_tag_cache_path_for, utc_now_str
 from artists import backfill_artists_from_items
@@ -31,7 +32,7 @@ COUNTER_KEYS = {
 FACET_KINDS = ("artist", "platform", "topic", "wd_tag")
 REPAIR_BATCH_SIZE = 500
 FULL_REBUILD_BATCH_SIZE = 2500
-WD_FRONTMATTER_FIELDS = ("wd_rating", "wd_character_tags", "wd_tags")
+WD_FRONTMATTER_FIELDS = ("wd_rating", "wd_character_tags", "wd_tags", "tag_groups")
 METADATA_SECONDARY_INDEXES = {
     "idx_item_topics_norm": "CREATE INDEX IF NOT EXISTS idx_item_topics_norm ON item_topics(topic_norm)",
     "idx_item_topics_hash": "CREATE INDEX IF NOT EXISTS idx_item_topics_hash ON item_topics(item_hash)",
@@ -508,6 +509,7 @@ def _cache_wd_payload(item_hash: str, storage_id: str) -> dict:
         "rating": cache_data.get("rating") or {},
         "character_tags": cache_data.get("character_tags") or [],
         "tags": cache_data.get("tags") or [],
+        "groups": extra_groups(cache_data.get("groups")),
     }
 
 
@@ -541,6 +543,7 @@ def _wd_payload(item_hash: str, storage_id: str, frontmatter: dict) -> dict:
         "rating": rating_payload,
         "character_tags": character_payload,
         "tags": tag_payload,
+        "groups": extra_groups(frontmatter.get("tag_groups")) if "tag_groups" in frontmatter else cache_payload.get("groups", {}),
     }
 
 
@@ -558,6 +561,8 @@ def _wd_rows(payload: dict) -> list[tuple[str, str]]:
         name = _tag_name(tag)
         if name:
             rows.append(("general", name))
+    for category, tags in extra_groups(payload.get("groups")).items():
+        rows.extend((category, tag) for tag in tags)
     return rows
 
 
@@ -1751,18 +1756,22 @@ def indexed_item_metadata(conn: sqlite3.Connection, item_hash: str) -> dict:
     rating = {}
     characters = []
     tags = []
+    groups = {}
     for tag_type, tag in tag_rows:
         if tag_type == "rating" and not rating:
             rating = {"label": tag}
         elif tag_type == "character":
             characters.append({"name": tag})
-        else:
+        elif tag_type == "general":
             tags.append({"name": tag})
+        else:
+            groups.setdefault(tag_type, []).append(tag)
     wd_data = {
-        "status": "ok" if rating or characters or tags else "missing",
+        "status": "ok" if rating or characters or tags or groups else "missing",
         "source": "metadata_index",
         "rating": rating,
         "character_tags": characters,
         "tags": tags,
+        "groups": groups,
     }
     return {"topics": topics, "wd_data": wd_data}

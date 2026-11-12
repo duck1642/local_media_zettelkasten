@@ -2,6 +2,7 @@
   import { TILE_MIN_WIDTH_CEILING, TILE_MIN_WIDTH_FLOOR } from './layout';
   import { appSettings, appSettingsDirty, appSettingsError, appSettingsSaving, saveCurrentAppSettings, updateAppSettings } from './appSettingsStore';
   import { IconSparkles, IconCheckCircle, IconAlertTriangle } from './icons';
+  import SettingsTaggingPanel from './SettingsTaggingPanel.svelte';
 
   function setConfig(mutator: (draft: any) => void) {
     updateAppSettings(mutator, false);
@@ -112,55 +113,7 @@
       </label>
     </div>
 
-    <label for="settings-enable-tagging">
-      Auto Tagging
-      <div class="micro-desc">Enables local AI-powered object detection and tag ingest.</div>
-    </label>
-    <div class="checkbox-group">
-      <label class="check-label" id="settings-enable-tagging">
-        <input type="checkbox" checked={$appSettings.tagging.enabled} on:change={(event) => setConfig((draft) => draft.tagging.enabled = checkedValue(event))} />
-        Enable WD Tagging
-      </label>
-    </div>
-
-    <label for="settings-model-repo">
-      Tag Model Repo
-      <div class="micro-desc">HuggingFace repository ID for the tagging model weights.</div>
-    </label>
-    <input id="settings-model-repo" type="text" value={$appSettings.tagging.model_repo} on:input={(event) => setConfig((draft) => draft.tagging.model_repo = textValue(event))} />
-
-    <label for="settings-tag-device">
-      Tag Device
-      <div class="micro-desc">Hardware accelerator device to bind for AI inference.</div>
-    </label>
-    <select id="settings-tag-device" value={$appSettings.tagging.device} on:change={(event) => setConfig((draft) => draft.tagging.device = textValue(event))}>
-      <option value="cpu">cpu</option>
-      <option value="cuda">cuda</option>
-      <option value="auto">auto</option>
-    </select>
-
-    <label for="settings-tag-threshold">
-      Tag Threshold
-      <div class="micro-desc">Inference confidence cutoff for auto-generated suggestions.</div>
-    </label>
-    <div class="slider-container">
-      <input
-        id="settings-tag-threshold"
-        type="range"
-        min="0.05"
-        max="1.0"
-        step="0.05"
-        value={$appSettings.tagging.threshold}
-        on:input={(event) => setConfig((draft) => draft.tagging.threshold = numberValue(event))}
-      />
-      <span class="slider-value">{Number($appSettings.tagging.threshold).toFixed(2)}</span>
-    </div>
-
-    <label for="settings-max-tags">
-      Max Ingest Tags
-      <div class="micro-desc">Maximum number of suggestions to associate per media file.</div>
-    </label>
-    <input id="settings-max-tags" type="number" value={$appSettings.tagging.max_tags} on:input={(event) => setConfig((draft) => draft.tagging.max_tags = numberValue(event))} />
+    <SettingsTaggingPanel />
   </div>
 </div>
 

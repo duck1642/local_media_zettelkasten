@@ -16,7 +16,14 @@ type VideoTaggingSettings = {
 };
 type TaggingSettings = {
   enabled: boolean;
+  backend: 'pixai' | 'wd';
   model_repo: string;
+  model_path: string;
+  profiles: Record<string, {
+    thresholds: Record<string, number>;
+    category_map: Record<string, string | null>;
+    label_map: Record<string, Record<string, string>>;
+  }>;
   device: 'auto' | 'cpu' | 'cuda';
   display_source: 'yaml' | 'database';
   threshold: number;
@@ -67,6 +74,9 @@ function normalize(value: AppSettings): AppSettings {
   next.ui.ram_tracking_enabled = Boolean(next.ui.ram_tracking_enabled);
   next.ingestion.processing.flatten_transparency = Boolean(next.ingestion.processing.flatten_transparency);
   next.tagging.enabled = next.tagging.enabled !== false;
+  next.tagging.backend ??= 'wd';
+  next.tagging.model_path ??= '';
+  next.tagging.profiles ??= {};
   next.tagging.threshold = Number(next.tagging.threshold ?? 0.35);
   next.tagging.max_tags = Number(next.tagging.max_tags ?? 30);
   return next;

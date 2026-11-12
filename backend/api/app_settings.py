@@ -40,6 +40,13 @@ async def get_app_settings(response: Response):
     return settings
 
 
+@router.get("/api/tagging/models")
+async def get_tagging_models():
+    from tagging.registry import describe_models
+
+    return describe_models()
+
+
 def _replace_settings_sync(settings: AppSettings, expected_etag: str):
     try:
         updated = _repository().replace(settings, expected_etag=_unquote_etag(expected_etag))

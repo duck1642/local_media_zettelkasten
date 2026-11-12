@@ -16,6 +16,7 @@ from metadata_index import (
     safe_reindex_item_metadata,
 )
 from runtime_context import WorkspaceContext, get_runtime_context
+from tagging.metadata import extra_groups
 from topics import (
     format_topics_for_note,
     parse_topic_value,
@@ -408,6 +409,8 @@ def _wd_rows_from_frontmatter(frontmatter: dict) -> list[tuple[str, str]]:
         rows.append(("rating", rating))
     rows.extend(("character", value) for value in normalize_topic_list(frontmatter.get("wd_character_tags")))
     rows.extend(("general", value) for value in normalize_topic_list(frontmatter.get("wd_tags")))
+    for category, tags in extra_groups(frontmatter.get("tag_groups")).items():
+        rows.extend((category, tag) for tag in tags)
     return rows
 
 
@@ -467,6 +470,23 @@ def _transform_wd_frontmatter(frontmatter: dict, tag_type: str | None, transform
         apply_list("wd_character_tags")
     if tag_type in {None, "general"}:
         apply_list("wd_tags")
+    groups = extra_groups(frontmatter.get("tag_groups"))
+    for category, tags in groups.items():
+        if tag_type is not None and tag_type != category:
+            continue
+        updated_tags = []
+        for value in tags:
+            updated = transform(value)
+            if updated != value:
+                changed = True
+                changed_norms.add(_topic_norm(value))
+                if updated:
+                    changed_norms.add(_topic_norm(updated))
+            if updated:
+                updated_tags.append(updated)
+        groups[category] = _dedupe(updated_tags)
+    if "tag_groups" in frontmatter:
+        frontmatter["tag_groups"] = groups
     return changed, changed_norms
 
 
@@ -494,8 +514,8 @@ def rewrite_wd_tags_across_workspace(tag: str, transform: Callable[[str], str | 
     if not tag_norm:
         raise ValueError("WD tag is required")
     clean_type = str(tag_type or "").strip().casefold() or None
-    if clean_type not in {None, "rating", "character", "general"}:
-        raise ValueError("WD tag type must be rating, character, or general")
+    if clean_type is not None and not all(char.isalnum() or char in "_-" for char in clean_type):
+        raise ValueError("Tag type must be a category name")
 
     result = MetadataMaintenanceResult()
     changed_norms: set[str] = {tag_norm}

@@ -54,6 +54,7 @@ from platforms import list_platforms, resolve_platform_label
 from pydantic import BaseModel
 from runtime_context import WorkspaceContext, get_runtime_context
 from tagging import load_tag_cache, tag_media
+from tagging.metadata import extra_groups
 from thumbnails import ThumbnailBusyError, get_or_generate_thumbnail
 from topics import ensure_topic_file, slugify_topic_label
 from utils import asset_path_for, asset_url_for, atomic_write_text, get_app_settings, note_path_for
@@ -852,7 +853,8 @@ def _get_item_details(h, row, conn=None):
                     "source": "cache",
                     "rating": cache_data.get("rating") or {},
                     "character_tags": cache_data.get("character_tags") or [],
-                    "tags": cache_data.get("tags") or []
+                    "tags": cache_data.get("tags") or [],
+                    "groups": extra_groups(cache_data.get("groups")),
                 }
     
     def get_names(tag_list):
@@ -890,12 +892,14 @@ def _get_item_details(h, row, conn=None):
     formatted_wd = {
         "rating": wd_data.get("rating", {}).get("label") or wd_data.get("rating", {}).get("name") or "None",
         "characters": get_names(wd_data.get("character_tags", [])),
-        "general": get_names(wd_data.get("tags", []))
+        "general": get_names(wd_data.get("tags", [])),
+        "groups": extra_groups(wd_data.get("groups")),
     }
     wd_values = [
         formatted_wd["rating"] if formatted_wd["rating"] != "None" else "",
         *formatted_wd["characters"],
         *formatted_wd["general"],
+        *(tag for tags in formatted_wd["groups"].values() for tag in tags),
     ]
     
     return {
@@ -1010,6 +1014,7 @@ class ItemUpdate(BaseModel):
     wd_rating: str = None
     wd_character_tags: list[str] = None
     wd_tags: list[str] = None
+    tag_groups: dict[str, list[str]] | None = None
 
 class BulkDeleteRequest(BaseModel):
     hashes: list[str]
@@ -1050,6 +1055,8 @@ def _update_item_sync(item_hash: str, update: ItemUpdate):
             if not isinstance(update.wd_tags, list):
                 raise HTTPException(status_code=400, detail="wd_tags must be a list")
             manual_overrides["wd_tags"] = normalize_topic_list(update.wd_tags)
+        if update.tag_groups is not None:
+            manual_overrides["tag_groups"] = extra_groups(update.tag_groups)
         wd_dictionary_rows = []
         if "wd_rating" in manual_overrides and manual_overrides["wd_rating"]:
             wd_dictionary_rows.append(("rating", manual_overrides["wd_rating"]))
@@ -1057,6 +1064,8 @@ def _update_item_sync(item_hash: str, update: ItemUpdate):
             wd_dictionary_rows.append(("character", value))
         for value in manual_overrides.get("wd_tags", []) or []:
             wd_dictionary_rows.append(("general", value))
+        for category, values in manual_overrides.get("tag_groups", {}).items():
+            wd_dictionary_rows.extend((category, value) for value in values)
         upsert_wd_dictionary_tags(workspace_conn, wd_dictionary_rows)
         
         md_content = generate_markdown(conn, item_hash, topics_override=update.topics, manual_overrides=manual_overrides)
@@ -1342,7 +1351,12 @@ async def trigger_tagging(item_hash: str):
                 if not current or current[2] != row[2] or not asset_path.exists():
                     raise HTTPException(status_code=404, detail="Item was deleted before tagging")
                 log_system("INFO", f"Triggering AI tagging for {item_hash}")
-                tag_media(asset_path, item_hash=item_hash, config=get_app_settings(), storage_id=row[2])
+                tag_result = tag_media(asset_path, item_hash=item_hash, config=get_app_settings(), storage_id=row[2])
+                if tag_result.status != "ok":
+                    raise HTTPException(
+                        status_code=503 if tag_result.status == "failed" else 409,
+                        detail=tag_result.error or "Tagging did not complete",
+                    )
 
                 md_content = generate_markdown(conn, item_hash, force_wd_from_cache=True)
                 if md_content:

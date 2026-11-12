@@ -1,3 +1,15 @@
-from tagging.service import TagResult, load_tag_cache, tag_media, wd_frontmatter_fields
 
-__all__ = ["TagResult", "load_tag_cache", "tag_media", "wd_frontmatter_fields"]
+from tagging.contracts import Prediction, TaggerBackend, TagResult
+from tagging.registry import describe_models
+from tagging.service import load_tag_cache, tag_media, unload_models, wd_frontmatter_fields
+
+__all__ = [
+    "Prediction",
+    "TagResult",
+    "TaggerBackend",
+    "describe_models",
+    "load_tag_cache",
+    "tag_media",
+    "unload_models",
+    "wd_frontmatter_fields",
+]

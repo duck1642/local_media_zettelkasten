@@ -37,6 +37,7 @@ PRE_RUNTIME_PUBLIC_PATHS = {
     "/",
     "/api/session-key",
     "/api/app/settings",
+    "/api/tagging/models",
     "/api/runtime/session",
     "/api/runtime/health",
 }

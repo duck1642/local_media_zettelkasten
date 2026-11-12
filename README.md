@@ -15,7 +15,7 @@ Primary target: Windows desktop
 - Review uncertain matches before saving a candidate as a variant, deleting it, or replacing matching media.
 - Organize libraries by artists, platforms, topics, tags, media type, and date.
 - Search and browse vaults with filters, facets, grid/masonry views, and an inspector.
-- Use optional local WD tagging with `SmilingWolf/wd-vit-tagger-v3`.
+- Use local AI tagging with recommended PixAI Tagger v1.0 or alternative WD ViT Tagger v3.
 - Manage multiple workspaces and vaults, including audits, repairs, backups, exports, restores, and vault merges.
 - Inspect startup, ingestion, review, and application logs from the UI.
 
@@ -82,11 +82,13 @@ This starts the local FastAPI backend on `127.0.0.1:8000`, starts Vite, and open
 
 1. Select the built-in **Default** workspace, or create an external workspace.
 2. Select or create a vault.
-3. Review processing and WD-tagging options under **Settings > General**.
+3. Review processing and AI-tagging options under **Settings > General**.
 4. Check downloader credentials under **Settings > Maintenance > Auth**.
 5. Add files under **Ingestion > Local**, or add URLs under **Ingestion > Online**.
 
-WD tagging may download `SmilingWolf/wd-vit-tagger-v3` the first time it is used. Video similarity fingerprinting may separately fetch `clip-ViT-B-32` when it is not cached. Disabling WD tagging prevents only the WD model download.
+Select **PixAI Tagger v1.0 (Recommended)** or **WD ViT Tagger v3 (Alternative)** under Settings > General. PixAI is the default for new settings; existing WD settings retain WD. Install PixAI's additional runtime with `python -m pip install ".[pixai]"`. You can point **Local Model Folder** at already downloaded model files, including the comparison prototype's model folder.
+
+The selected tagger may download its model on first use. Video similarity fingerprinting may separately fetch `clip-ViT-B-32` when it is not cached. Disabling AI tagging prevents only the tagger model download. Models run locally. See [Tagging backends and output profiles](TAGGING.md) for category controls, compatibility and adding an adapter.
 
 ## Core Workflows
 
@@ -223,7 +225,7 @@ Runtime data, credentials, models, logs, backups, exports, and generated build a
 
 - LMZ has no required hosted library service; library files and databases stay local.
 - Online ingestion sends requests to the source platform through the configured downloader.
-- WD tagging may download `SmilingWolf/wd-vit-tagger-v3`; video similarity fingerprinting may separately fetch `clip-ViT-B-32` when it is not cached.
+- AI tagging may download the selected PixAI or WD model; video similarity fingerprinting may separately fetch `clip-ViT-B-32` when it is not cached.
 - Backups, exports, logs, and browser-capture caches may contain sensitive paths or metadata.
 - Confirmation dialogs and path guards reduce accidental damage but do not replace independent backups.
 

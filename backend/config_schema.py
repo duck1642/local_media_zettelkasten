@@ -92,15 +92,59 @@ class VideoTaggingSettings(StrictModel):
         return self
 
 
+class TagOutputProfile(StrictModel):
+    thresholds: dict[str, Annotated[float, Field(ge=0, le=1)]] = Field(default_factory=dict)
+    category_map: dict[str, str | None] = Field(default_factory=dict)
+    label_map: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+    @field_validator("category_map")
+    @classmethod
+    def validate_categories(cls, value):
+        for source, target in value.items():
+            if not source.strip() or (target is not None and (not target.strip() or target != target.strip())):
+                raise ValueError("category names cannot be empty or padded with whitespace")
+            if target is not None and not all(char.isalnum() or char in "_-" for char in target):
+                raise ValueError("target categories must contain only letters, numbers, '_' or '-'")
+            if target is not None and target != target.lower():
+                raise ValueError("target categories must be lowercase")
+        return value
+
+    @field_validator("label_map")
+    @classmethod
+    def validate_labels(cls, value):
+        if any(not name.strip() or not label.strip() for labels in value.values() for name, label in labels.items()):
+            raise ValueError("label names cannot be empty")
+        return value
+
+
 class TaggingSettings(StrictModel):
     enabled: bool = True
-    model_repo: str = "SmilingWolf/wd-vit-tagger-v3"
+    backend: Literal["pixai", "wd"] = "pixai"
+    model_repo: str = ""
+    model_path: str = ""
+    profiles: dict[str, TagOutputProfile] = Field(default_factory=dict)
     device: Literal["auto", "cpu", "cuda"] = "auto"
     display_source: Literal["yaml", "database"] = "yaml"
     threshold: Annotated[float, Field(ge=0, le=1)] = 0.35
     max_tags: Annotated[int, Field(ge=1, le=1000)] = 30
     fail_ingestion_on_error: bool = False
     video: VideoTaggingSettings = Field(default_factory=VideoTaggingSettings)
+
+    @field_validator("model_repo")
+    @classmethod
+    def validate_model_repository(cls, value: str) -> str:
+        value = value.strip()
+        if value and ("\\" in value or ":" in value or len(value.split("/")) > 2 or any(part in {"", ".", ".."} for part in value.split("/"))):
+            raise ValueError("model_repo must be a repository ID; use model_path for a local folder")
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_legacy_backend(cls, value):
+        if isinstance(value, dict) and value and "backend" not in value:
+            value = dict(value)
+            value["backend"] = "pixai" if str(value.get("model_repo", "")).startswith("pixai-labs/") else "wd"
+        return value
 
 
 class AppSettings(StrictModel):

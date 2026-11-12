@@ -926,7 +926,7 @@ def test_runtime_context_rejects_legacy_models_path(monkeypatch, tmp_path):
 
 
 def test_tagger_model_lookup_uses_runtime_models_dir(monkeypatch, tmp_path):
-    service, = fresh_backend(monkeypatch, tmp_path, "tagging.service")
+    wd, = fresh_backend(monkeypatch, tmp_path, "tagging.wd")
     expected_dir = tmp_path / "app-models"
     calls = []
 
@@ -934,14 +934,12 @@ def test_tagger_model_lookup_uses_runtime_models_dir(monkeypatch, tmp_path):
         calls.append(kwargs)
         return str(Path(kwargs["local_dir"]) / kwargs["filename"])
 
-    monkeypatch.setattr(service, "get_runtime_context", lambda: types.SimpleNamespace(models_dir=expected_dir))
-
-    model_path, tags_path = service._ensure_model_files("org/test-model", fake_download)
+    model_path, tags_path = wd._ensure_model_files("org/test-model", fake_download, expected_dir)
 
     assert calls
-    assert {call["local_dir"] for call in calls} == {str(expected_dir / "test-model")}
-    assert model_path == expected_dir / "test-model" / "model.onnx"
-    assert tags_path == expected_dir / "test-model" / "selected_tags.csv"
+    assert {call["local_dir"] for call in calls} == {str(expected_dir / "wd" / "org--test-model")}
+    assert model_path == expected_dir / "wd" / "org--test-model" / "model.onnx"
+    assert tags_path == expected_dir / "wd" / "org--test-model" / "selected_tags.csv"
 
 
 def test_workspace_setup_refuses_runtime_paths(tmp_path):
@@ -2640,8 +2638,10 @@ def test_review_multi_match_and_safe_specific_replace(monkeypatch, tmp_path):
 
 def test_wd_tagger_reuses_cached_session(monkeypatch, tmp_path):
     service, utils = fresh_backend(monkeypatch, tmp_path, "tagging.service", "utils")
+    wd = importlib.import_module("tagging.wd")
+    from tagging.contracts import Prediction
     source = tmp_path / "tagged.jpg"
-    source.write_bytes(b"image")
+    service.Image.new("RGB", (8, 8)).save(source)
     calls = {"sessions": 0}
 
     class FakeSession:
@@ -2665,10 +2665,9 @@ def test_wd_tagger_reuses_cached_session(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
     monkeypatch.setattr(service, "get_mime_type", lambda path: "image/jpeg")
-    monkeypatch.setattr(service, "_ensure_model_files", lambda repo, hf: (tmp_path / "model.onnx", tmp_path / "tags.csv"))
-    monkeypatch.setattr(service, "_load_labels", lambda path: [{"name": "safe", "category": "9"}])
-    monkeypatch.setattr(service.Image, "open", lambda path: types.SimpleNamespace(seek=lambda frame: None))
-    monkeypatch.setattr(service, "_predict_image_tags", lambda *args, **kwargs: ({"label": "safe"}, [], [{"name": "tag"}]))
+    monkeypatch.setattr(wd, "_ensure_model_files", lambda repo, hf, models_dir, local_path: (tmp_path / "model.onnx", tmp_path / "tags.csv"))
+    monkeypatch.setattr(wd, "_load_labels", lambda path: [{"name": "safe", "category": "9"}])
+    monkeypatch.setattr(wd, "_predict_image_tags", lambda *args, **kwargs: [Prediction("safe", "rating", 0.9), Prediction("tag", "general", 0.8)])
 
     first = service.tag_media(source, item_hash="6" * 64, config={"tagging": {"device": "cpu"}}, storage_id="000000000001")
     second = service.tag_media(source, item_hash="7" * 64, config={"tagging": {"device": "cpu"}}, storage_id="000000000002")
@@ -2681,8 +2680,10 @@ def test_wd_tagger_reuses_cached_session(monkeypatch, tmp_path):
 
 def test_wd_tagger_concurrent_calls_initialize_session_once(monkeypatch, tmp_path):
     service, = fresh_backend(monkeypatch, tmp_path, "tagging.service")
+    wd = importlib.import_module("tagging.wd")
+    from tagging.contracts import Prediction
     source = tmp_path / "tagged.jpg"
-    source.write_bytes(b"image")
+    service.Image.new("RGB", (8, 8)).save(source)
     calls = {"sessions": 0}
 
     class FakeSession:
@@ -2702,10 +2703,9 @@ def test_wd_tagger_concurrent_calls_initialize_session_once(monkeypatch, tmp_pat
     monkeypatch.setitem(sys.modules, "onnxruntime", types.SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"], InferenceSession=FakeSession))
     monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=lambda **kwargs: ""))
     monkeypatch.setattr(service, "get_mime_type", lambda path: "image/jpeg")
-    monkeypatch.setattr(service, "_ensure_model_files", lambda repo, hf: (tmp_path / "model.onnx", tmp_path / "tags.csv"))
-    monkeypatch.setattr(service, "_load_labels", lambda path: [{"name": "safe", "category": "9"}])
-    monkeypatch.setattr(service.Image, "open", lambda path: types.SimpleNamespace(seek=lambda frame: None))
-    monkeypatch.setattr(service, "_predict_image_tags", lambda *args, **kwargs: ({"label": "safe"}, [], []))
+    monkeypatch.setattr(wd, "_ensure_model_files", lambda repo, hf, models_dir, local_path: (tmp_path / "model.onnx", tmp_path / "tags.csv"))
+    monkeypatch.setattr(wd, "_load_labels", lambda path: [{"name": "safe", "category": "9"}])
+    monkeypatch.setattr(wd, "_predict_image_tags", lambda *args, **kwargs: [Prediction("safe", "rating", 0.9)])
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         results = list(executor.map(lambda index: service.tag_media(source, item_hash=f"{index:064x}", config={"tagging": {"device": "cpu"}}), range(4)))
@@ -2716,8 +2716,10 @@ def test_wd_tagger_concurrent_calls_initialize_session_once(monkeypatch, tmp_pat
 
 def test_wd_tagger_failed_session_is_not_cached(monkeypatch, tmp_path):
     service, = fresh_backend(monkeypatch, tmp_path, "tagging.service")
+    wd = importlib.import_module("tagging.wd")
+    from tagging.contracts import Prediction
     source = tmp_path / "tagged.jpg"
-    source.write_bytes(b"image")
+    service.Image.new("RGB", (8, 8)).save(source)
     calls = {"sessions": 0}
 
     class FakeSession:
@@ -2738,10 +2740,9 @@ def test_wd_tagger_failed_session_is_not_cached(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "onnxruntime", types.SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"], InferenceSession=FakeSession))
     monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=lambda **kwargs: ""))
     monkeypatch.setattr(service, "get_mime_type", lambda path: "image/jpeg")
-    monkeypatch.setattr(service, "_ensure_model_files", lambda repo, hf: (tmp_path / "model.onnx", tmp_path / "tags.csv"))
-    monkeypatch.setattr(service, "_load_labels", lambda path: [{"name": "safe", "category": "9"}])
-    monkeypatch.setattr(service.Image, "open", lambda path: types.SimpleNamespace(seek=lambda frame: None))
-    monkeypatch.setattr(service, "_predict_image_tags", lambda *args, **kwargs: ({"label": "safe"}, [], []))
+    monkeypatch.setattr(wd, "_ensure_model_files", lambda repo, hf, models_dir, local_path: (tmp_path / "model.onnx", tmp_path / "tags.csv"))
+    monkeypatch.setattr(wd, "_load_labels", lambda path: [{"name": "safe", "category": "9"}])
+    monkeypatch.setattr(wd, "_predict_image_tags", lambda *args, **kwargs: [Prediction("safe", "rating", 0.9)])
 
     failed = service.tag_media(source, item_hash="8" * 64, config={"tagging": {"device": "cpu"}})
     recovered = service.tag_media(source, item_hash="9" * 64, config={"tagging": {"device": "cpu"}})

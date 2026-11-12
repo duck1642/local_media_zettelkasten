@@ -4,6 +4,7 @@ import yaml
 from datetime import datetime
 
 from tagging import wd_frontmatter_fields
+from tagging.metadata import extra_groups
 from topics import format_topics_for_note
 from utils import note_path_for, require_storage_id, storage_shard_for_hash, utc_now_str
 
@@ -13,6 +14,7 @@ MANUAL_FRONTMATTER_FIELDS = (
     "wd_rating",
     "wd_character_tags",
     "wd_tags",
+    "tag_groups",
 )
 WD_FRONTMATTER_FIELDS = ("wd_rating", "wd_character_tags", "wd_tags")
 
@@ -80,9 +82,13 @@ def generate_markdown(conn: sqlite3.Connection, file_hash: str, asset_rel_path: 
             frontmatter[field] = cache_wd_fields.get(field, [] if field != "wd_rating" else "")
         else:
             frontmatter[field] = existing_frontmatter[field] if field in existing_frontmatter else cache_wd_fields.get(field, [] if field != "wd_rating" else "")
+    if "tag_groups" in existing_frontmatter or "tag_groups" in cache_wd_fields:
+        # Normal akışta boş not grubu da bilinçli düzenleme sayılır; cache onu doldurmaz.
+        groups = cache_wd_fields if force_wd_from_cache else existing_frontmatter if "tag_groups" in existing_frontmatter else cache_wd_fields
+        frontmatter["tag_groups"] = extra_groups(groups.get("tag_groups"))
     for field, value in (manual_overrides or {}).items():
         if field in MANUAL_FRONTMATTER_FIELDS:
-            frontmatter[field] = format_topics_for_note(value, note_path) if field == "topics" else value
+            frontmatter[field] = format_topics_for_note(value, note_path) if field == "topics" else extra_groups(value) if field == "tag_groups" else value
 
 
     fm_str = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False, allow_unicode=True)
@@ -141,7 +147,7 @@ def load_note_topics(file_hash: str, storage_id: str, fallback=None) -> list[str
 
 def load_note_wd_tags(file_hash: str, storage_id: str) -> dict:
     frontmatter = load_note_frontmatter(file_hash, storage_id)
-    has_wd_fields = any(field in frontmatter for field in WD_FRONTMATTER_FIELDS)
+    has_wd_fields = "tag_groups" in frontmatter or any(field in frontmatter for field in WD_FRONTMATTER_FIELDS)
     rating = str(frontmatter.get("wd_rating") or "").strip()
     characters = normalize_topic_list(frontmatter.get("wd_character_tags"))
     tags = normalize_topic_list(frontmatter.get("wd_tags"))
@@ -151,4 +157,5 @@ def load_note_wd_tags(file_hash: str, storage_id: str) -> dict:
         "rating": {"label": rating} if rating else {},
         "character_tags": [{"name": tag} for tag in characters],
         "tags": [{"name": tag} for tag in tags],
+        "groups": extra_groups(frontmatter.get("tag_groups")),
     }

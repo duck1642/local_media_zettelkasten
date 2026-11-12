@@ -5,13 +5,14 @@
   export let rating = '';
   export let characters: string[] = [];
   export let general: string[] = [];
+  export let groups: Record<string, string[]> = {};
   export let wdTagCounts: Record<string, number> | undefined = undefined;
   export let draftTopics: string[] = [];
   export let savedTopics: string[] = [];
   export let isAlreadyTopic: (value: string, saved: string[]) => boolean = () => false;
   export let isTagPromoted: (value: string, draft: string[], saved: string[]) => boolean = () => false;
   export let promoteHandler: (value: string) => void = () => {};
-  export let removeTagHandler: (kind: 'rating' | 'character' | 'general', value: string) => void = () => {};
+  export let removeTagHandler: (kind: string, value: string) => void = () => {};
 
   const dispatch = createEventDispatcher();
 
@@ -25,7 +26,7 @@
     dispatch('promote', value);
   }
 
-  function remove(kind: 'rating' | 'character' | 'general', value: string) {
+  function remove(kind: string, value: string) {
     removeTagHandler(kind, value);
     dispatch('remove', { kind, value });
   }
@@ -33,7 +34,7 @@
 
 <div class="group-container">
   <!-- svelte-ignore a11y-label-has-associated-control -->
-  <label class="section-label">WD Suggestions</label>
+  <label class="section-label">AI Tag Suggestions</label>
 
   <div class="tags-list suggestions-wrap">
     {#if rating}
@@ -82,7 +83,21 @@
     {/each}
   </div>
 
-  {#if !rating && (!characters || characters.length === 0) && (!general || general.length === 0)}
+  {#each Object.entries(groups) as [category, tags]}
+    {#if tags.length}
+      <div class="section-label">{category}</div>
+      <div class="tags-list suggestions-wrap">
+        {#each tags as tag}
+          <InspectorTagChip label={tag} kind="visual" count={countFor(tag)} interactive
+            clickable={!isAlreadyTopic(tag, savedTopics)} promoted={isTagPromoted(tag, draftTopics, savedTopics)}
+            title={isAlreadyTopic(tag, savedTopics) ? 'Already a topic' : 'Promote to topic'}
+            removeTitle="Remove AI tag" activateHandler={() => promote(tag)} removeHandler={() => remove(category, tag)} />
+        {/each}
+      </div>
+    {/if}
+  {/each}
+
+  {#if !rating && (!characters || characters.length === 0) && (!general || general.length === 0) && !Object.values(groups).some((tags) => tags.length)}
     <div class="value-text">No suggestions</div>
   {/if}
 </div>

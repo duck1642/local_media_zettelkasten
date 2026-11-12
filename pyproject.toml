@@ -39,6 +39,11 @@ unix = [
 gpu = [
     "onnxruntime-gpu>=1.17,<2",
 ]
+pixai = [
+    "transformers>=4.57,<5",
+    "torchvision>=0.20,<1",
+    "timm>=1,<2",
+]
 tauri = [
     "pyinstaller>=6,<7",
 ]
