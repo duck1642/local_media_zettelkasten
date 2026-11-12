@@ -20,7 +20,7 @@ from db.sqlite_operator import (
     connect_database, check_duplicate_hash, insert_to_database, allocate_storage_id,
     insert_tiles
 )
-from db.search_manager import search_manager
+from db.search_manager import SearchIndexUnavailableError, search_manager
 from md_generator import generate_markdown
 from metadata_index import safe_reindex_item_metadata
 from logger import log_activity, log_system
@@ -158,10 +158,7 @@ def find_visual_duplicate(new_phash: str, threshold: int = IMAGE_REVIEW_PHASH_TH
     try:
         all_matches_dict = {}
 
-        try:
-            matches = search_manager.query_image(new_phash, threshold, ctx=ctx)
-        except TypeError:
-            matches = search_manager.query_image(new_phash, threshold)
+        matches = search_manager.query_image(new_phash, threshold, ctx=ctx)
 
         for f_hash, dist, m_type in matches:
             total_conflicts += 1
@@ -174,10 +171,7 @@ def find_visual_duplicate(new_phash: str, threshold: int = IMAGE_REVIEW_PHASH_TH
 
         if not best_match and new_tiles:
             for t_index, t_phash in new_tiles:
-                try:
-                    tile_matches = search_manager.query_global_only(t_phash, threshold, ctx=ctx)
-                except TypeError:
-                    tile_matches = search_manager.query_global_only(t_phash, threshold)
+                tile_matches = search_manager.query_global_only(t_phash, threshold, ctx=ctx)
                 if tile_matches:
                     for fh, dist in tile_matches:
                         if fh not in all_matches_dict or dist < all_matches_dict[fh]:
@@ -197,6 +191,8 @@ def find_visual_duplicate(new_phash: str, threshold: int = IMAGE_REVIEW_PHASH_TH
             sorted_keys.insert(0, best_match)
         all_hashes = sorted_keys
 
+    except SearchIndexUnavailableError:
+        raise
     except Exception as e:
         log_system("ERROR", f"Search error in find_visual_duplicate: {e}")
 
@@ -214,10 +210,7 @@ def find_video_duplicate(audio_hash: bytes, visual_embedding: bytes, ai_threshol
 
     try:
 
-        try:
-            matches = search_manager.query_video(audio_hash, visual_embedding, ai_threshold, ctx=ctx)
-        except TypeError:
-            matches = search_manager.query_video(audio_hash, visual_embedding, ai_threshold)
+        matches = search_manager.query_video(audio_hash, visual_embedding, ai_threshold, ctx=ctx)
 
 
         conflict_map = {}
@@ -258,6 +251,8 @@ def find_video_duplicate(audio_hash: bytes, visual_embedding: bytes, ai_threshol
             sorted_keys.insert(0, best_match)
         all_hashes = sorted_keys
 
+    except SearchIndexUnavailableError:
+        raise
     except Exception as e:
         log_system("ERROR", f"Search error in find_video_duplicate: {e}")
 
@@ -288,10 +283,7 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
         return False, f"Invalid extension: {filepath.suffix}", None
 
     file_hash = calculate_file_hash(filepath)
-    try:
-        pending_review = _pending_review_match(file_hash, ctx=ctx)
-    except TypeError:
-        pending_review = _pending_review_match(file_hash)
+    pending_review = _pending_review_match(file_hash, ctx=ctx)
     if pending_review and not allow_pending_review:
         log_system(
             "INFO",
@@ -329,7 +321,11 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
             pass
 
         if phash and not skip_similarity:
-            conflict_hash, match_type, total_conflicts, distance, all_matches = find_visual_duplicate(phash, threshold=IMAGE_REVIEW_PHASH_THRESHOLD, new_tiles=tiles, ctx=ctx, return_all=True)
+            try:
+                conflict_hash, match_type, total_conflicts, distance, all_matches = find_visual_duplicate(phash, threshold=IMAGE_REVIEW_PHASH_THRESHOLD, new_tiles=tiles, ctx=ctx, return_all=True)
+            except SearchIndexUnavailableError as exc:
+                conn.close()
+                return False, str(exc), None
             if conflict_hash:
 
                 conn.close()
@@ -387,7 +383,11 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
             pass
 
         if (audio_hash or visual_embedding) and not skip_similarity:
-            conflict_hash, match_type, total_conflicts, similarity, all_matches = find_video_duplicate(audio_hash, visual_embedding, ai_threshold=0.08, ctx=ctx, return_all=True)
+            try:
+                conflict_hash, match_type, total_conflicts, similarity, all_matches = find_video_duplicate(audio_hash, visual_embedding, ai_threshold=0.08, ctx=ctx, return_all=True)
+            except SearchIndexUnavailableError as exc:
+                conn.close()
+                return False, str(exc), None
             if conflict_hash:
 
                 conn.close()
@@ -426,6 +426,7 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
 
     vault_path = None
     md_path = None
+    committed = False
 
     try:
         storage_id = allocate_storage_id(conn)
@@ -502,6 +503,7 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
                 (file_hash,)
             )
         conn.commit()
+        committed = True
 
         if is_media:
             try:
@@ -530,10 +532,7 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
                 "audio_hash": index_data["audio_hash"],
                 "visual_embedding": index_data["visual_embedding"],
             }
-            try:
-                search_manager.update_indexes(**search_index_data, ctx=ctx)
-            except TypeError:
-                search_manager.update_indexes(**search_index_data)
+            search_manager.update_indexes(**search_index_data, ctx=ctx, conn=conn)
 
         if delete_source:
             cleanup_error = None
@@ -573,6 +572,12 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
             conn.rollback()
         except Exception:
             pass
+
+        if committed:
+            # commit() made the item durable. A later index/logging failure must
+            # not delete its files or tell the caller that the insert rolled back.
+            log_system("ERROR", "Ingest committed but follow-up failed", file=filepath.name, error=str(e))
+            return True, f"Success: {filepath.name} -> {new_filename}", index_data
 
         try:
             if vault_path and vault_path.exists():

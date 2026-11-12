@@ -1,4 +1,5 @@
 
+
 from logger import log_ingest_local, log_ingest_online
 from utils import setup_directories, get_app_settings
 from runtime_context import reload_runtime_context
@@ -67,11 +68,7 @@ def main():
             continue
 
 
-        import inspect
-        p_kwargs = {"delete_source": True, "sync_index": False}
-        if "ctx" in inspect.signature(process_file).parameters:
-            p_kwargs["ctx"] = ctx
-        success, message, idx_data = process_file(filepath, config, **p_kwargs)
+        success, message, idx_data = process_file(filepath, config, delete_source=True, sync_index=False, ctx=ctx)
 
         if success:
             log_ingest_local('INFO', f"{message}")
@@ -92,11 +89,6 @@ def main():
 
     if local_index_queue:
         log_ingest_local('INFO', f"Syncing RAM indexes for {len(local_index_queue)} local items...")
-        for item in local_index_queue:
-            filtered_item = {
-                k: v for k, v in item.items()
-                if k in {"file_hash", "phash", "url", "tiles", "audio_hash", "visual_embedding"}
-            }
-            search_manager.update_indexes(**filtered_item, ctx=ctx)
+        search_manager.update_indexes_batch(local_index_queue, ctx=ctx)
 
     log_ingest_local('INFO', f"\nFINAL SUMMARY: {stats['processed']} Added | {stats['skipped']} Skipped/Duplicates | {stats['errors']} Errors")

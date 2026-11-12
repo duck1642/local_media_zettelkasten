@@ -1,218 +1,13 @@
 
-from abc import ABC, abstractmethod
 import copy
-from typing import List, Tuple, Optional, Any, Dict
-
-class BaseSearcher(ABC):
 
 
-    @abstractmethod
-    def add(self, item_hash: str, signature: Any):
-
-        pass
-
-    @abstractmethod
-    def query(self, signature: Any, threshold: Any) -> List[Tuple[str, Any]]:
-
-        pass
-
-class VPTreeSearcher(BaseSearcher):
-
-    def __init__(self, distance_func):
-        self.distance_func = distance_func
-        self.tree = None
-        self.indexed_items = []
-        self.pending_items = []
-        self.dirty = False
-        self.rebuild_count = 0
-        self.mutation_version = 0
-
-    def add(self, item_hash: str, signature: Any):
-
-        if signature is not None:
-            self.pending_items.append((item_hash, signature))
-            self.dirty = True
-
-    def remove_hashes(self, item_hashes: set[str]) -> dict:
-        if not item_hashes:
-            return {"removed": 0, "rebuilt": False}
-
-        before_indexed = len(self.indexed_items)
-        before_pending = len(self.pending_items)
-        self.indexed_items = [item for item in self.indexed_items if item[0] not in item_hashes]
-        self.pending_items = [item for item in self.pending_items if item[0] not in item_hashes]
-        removed = (before_indexed - len(self.indexed_items)) + (before_pending - len(self.pending_items))
-
-        if removed:
-            self.mutation_version += 1
-        if before_indexed != len(self.indexed_items):
-            self.tree = None
-            self.dirty = bool(self.indexed_items or self.pending_items)
-        else:
-            self.dirty = bool(self.pending_items)
-        return {"removed": removed, "rebuilt": False, "deferred": before_indexed != len(self.indexed_items)}
-
-    def build_index(self):
-
-        pending_count = len(self.pending_items)
-        if pending_count:
-            self.indexed_items.extend(self.pending_items)
-            self.pending_items = []
-        if not self.indexed_items:
-            self.tree = None
-            self.dirty = False
-            return {"indexed": 0, "merged": pending_count, "rebuilt": False}
-        if not self.dirty and self.tree is not None:
-            return {"indexed": len(self.indexed_items), "merged": 0, "rebuilt": False}
-        self.tree = self._make_tree(self.indexed_items)
-        self.dirty = False
-        self.rebuild_count += 1
-        return {"indexed": len(self.indexed_items), "merged": pending_count, "rebuilt": True}
-
-    def rebuild_plan(self):
-        pending_count = len(self.pending_items)
-        if pending_count <= 0 and not self.dirty:
-            return None
-        return {
-            "indexed_items": list(self.indexed_items),
-            "pending_items": list(self.pending_items),
-            "dirty": self.dirty,
-            "rebuild_count": self.rebuild_count,
-            "mutation_version": self.mutation_version,
-        }
-
-    def build_replacement(self, plan: dict):
-        indexed_items = list(plan["indexed_items"])
-        pending_items = list(plan["pending_items"])
-        combined_items = indexed_items + pending_items
-        if not combined_items:
-            return {
-                "tree": None,
-                "indexed_items": [],
-                "merged": len(pending_items),
-                "rebuilt": False,
-            }
-        if not pending_items and not plan.get("dirty") and self.tree is not None:
-            return {
-                "tree": self.tree,
-                "indexed_items": indexed_items,
-                "merged": 0,
-                "rebuilt": False,
-            }
-        return {
-            "tree": self._make_tree(combined_items),
-            "indexed_items": combined_items,
-            "merged": len(pending_items),
-            "rebuilt": True,
-        }
-
-    def apply_replacement(self, plan: dict, replacement: dict):
-        merged = int(replacement.get("merged") or 0)
-        planned_pending_hashes = {item[0] for item in plan.get("pending_items") or []}
-        current_hashes = {item[0] for item in self.indexed_items}
-        current_hashes.update(item[0] for item in self.pending_items)
-        if merged:
-            self.pending_items = [item for item in self.pending_items if item[0] not in planned_pending_hashes]
-        replacement_items = list(replacement.get("indexed_items") or [])
-        stale = self.mutation_version != int(plan.get("mutation_version") or 0)
-        if stale:
-            self.indexed_items = [item for item in replacement_items if item[0] in current_hashes]
-            self.tree = None
-            self.dirty = bool(self.indexed_items or self.pending_items)
-        else:
-            self.indexed_items = replacement_items
-            self.tree = replacement.get("tree")
-            self.dirty = bool(self.pending_items)
-        if replacement.get("rebuilt"):
-            self.rebuild_count += 1
-        return {
-            "indexed": len(self.indexed_items),
-            "merged": merged,
-            "rebuilt": bool(replacement.get("rebuilt")),
-            "stale": stale,
-        }
-
-    def snapshot(self) -> dict:
-        return {
-            "tree": self.tree,
-            "pending_items": list(self.pending_items),
-            "distance_func": self.distance_func,
-        }
-
-    @property
-    def items(self):
-        return self.indexed_items + self.pending_items
-
-    def pending_count(self) -> int:
-        return len(self.pending_items)
-
-    def indexed_count(self) -> int:
-        return len(self.indexed_items)
-
-
-    def _make_tree(self, items):
-        if not items:
-            return None
-
-
-        vp_item = items[0]
-        if len(items) == 1:
-            return (vp_item, 0, None, None)
-
-
-        distances = []
-        for i in range(1, len(items)):
-            dist = self.distance_func(vp_item[1], items[i][1])
-            distances.append((dist, items[i]))
-
-
-        distances.sort(key=lambda x: x[0])
-        median_idx = len(distances) // 2
-        median_dist = distances[median_idx][0]
-
-        left_items = [d[1] for d in distances[:median_idx]]
-        right_items = [d[1] for d in distances[median_idx:]]
-
-        return (vp_item, median_dist, self._make_tree(left_items), self._make_tree(right_items))
-
-    def query(self, query_sig: Any, threshold: float) -> List[Tuple[str, float]]:
-        return self.query_snapshot(self.snapshot(), query_sig, threshold)
-
-    @classmethod
-    def query_snapshot(cls, snapshot: dict, query_sig: Any, threshold: float) -> List[Tuple[str, float]]:
-        results = []
-        tree = snapshot.get("tree")
-        distance_func = snapshot["distance_func"]
-        if tree is not None:
-            cls._search_snapshot(tree, query_sig, threshold, results, distance_func)
-        for item_hash, signature in snapshot.get("pending_items") or []:
-            dist = distance_func(query_sig, signature)
-            if dist <= threshold:
-                results.append((item_hash, dist))
-        return sorted(results, key=lambda x: x[1])
-
-    @classmethod
-    def _search_snapshot(cls, node, query_sig, threshold, results, distance_func):
-        if node is None:
-            return
-
-        vp_item, median_dist, left_child, right_child = node
-        dist = distance_func(query_sig, vp_item[1])
-
-        if dist <= threshold:
-            results.append((vp_item[0], dist))
-
-        if dist - threshold <= median_dist:
-            cls._search_snapshot(left_child, query_sig, threshold, results, distance_func)
-
-        if dist + threshold >= median_dist:
-            cls._search_snapshot(right_child, query_sig, threshold, results, distance_func)
-
-class BKTreeSearcher(BaseSearcher):
+class BKTreeSearcher:
 
     def __init__(self):
         self.tree = None
         self.items = []
+        self._item_set = set()
 
     @staticmethod
     def _hamming_distance(h1: str, h2: str) -> int:
@@ -231,9 +26,10 @@ class BKTreeSearcher(BaseSearcher):
         if not phash_str or phash_str == "None":
             return
         item = (item_hash, phash_str)
-        if item in self.items:
+        if item in self._item_set:
             return
         self.items.append(item)
+        self._item_set.add(item)
         self._add_to_tree(item_hash, phash_str)
 
     def remove_hashes(self, item_hashes: set[str]) -> dict:
@@ -244,6 +40,7 @@ class BKTreeSearcher(BaseSearcher):
         removed = before - len(self.items)
         if not removed:
             return {"removed": 0, "rebuilt": False}
+        self._item_set = set(self.items)
         self.tree = None
         for item_hash, phash_str in self.items:
             self._add_to_tree(item_hash, phash_str)
@@ -272,14 +69,16 @@ class BKTreeSearcher(BaseSearcher):
                 children[dist] = (phash_str, [item_hash], {})
                 break
 
-    def query(self, query_phash: str, threshold: int) -> List[Tuple[str, int]]:
-        return self.query_snapshot(self.snapshot(), query_phash, threshold)
+    def query(self, query_phash: str, threshold: int) -> list[tuple[str, int]]:
+        # SearchManager serializes queries and mutations with its state lock.
+        # Avoid copying the entire index for each lookup inside that lock.
+        return self.query_snapshot(self.tree, query_phash, threshold)
 
     def snapshot(self):
         return copy.deepcopy(self.tree)
 
     @classmethod
-    def query_snapshot(cls, tree, query_phash: str, threshold: int) -> List[Tuple[str, int]]:
+    def query_snapshot(cls, tree, query_phash: str, threshold: int) -> list[tuple[str, int]]:
 
         if tree is None or not query_phash:
             return []

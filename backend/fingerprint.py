@@ -225,7 +225,7 @@ def compare_audio_fingerprints(fp1_bytes: bytes, fp2_bytes: bytes) -> float:
     xor_res = a.astype(np.uint32) ^ b.astype(np.uint32)
 
 
-    diff_bits = int(np.unpackbits(xor_res.view(np.uint8)).sum())
+    diff_bits = int(np.bitwise_count(xor_res).sum())
     total_bits = length * 32
 
     return 1.0 - (diff_bits / total_bits)

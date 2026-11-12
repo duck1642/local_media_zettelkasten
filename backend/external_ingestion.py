@@ -15,7 +15,15 @@ from db.sqlite_operator import connect_database, normalize_source_url
 from db.search_manager import search_manager
 from processor import process_file
 from logger import log_ingest_audit, log_ingest_online
+from media_lifecycle import storage_lifecycle_lock
+from metadata_index import (
+    _item_facet_values,
+    ensure_metadata_schema,
+    refresh_metadata_facet_counts_for_values,
+    refresh_metadata_index_counters,
+)
 from queue_service import QueueEntry, parse_queue, queue_path
+from thumbnails import thumbnail_path_for, video_thumbnail_path_for
 from downloaders.gallery_dl_wrapper import download_gallery, inspect_gallery
 from downloaders.yt_dlp_wrapper import download_video, inspect_youtube_community
 import random
@@ -23,6 +31,8 @@ from ingest_control import online_stop_event
 
 
 GLOBAL_WORKER_LIMIT: Optional[threading.Semaphore] = None
+_GLOBAL_WORKER_LIMIT_SIZE: int | None = None
+_GLOBAL_WORKER_LIMIT_LOCK = threading.Lock()
 
 
 def _online_process_metadata(metadata: dict, run_id: str, user_metadata: dict | None = None) -> dict:
@@ -51,11 +61,16 @@ class ExternalIngestor:
         self.skip_validation = skip_validation
 
 
-        global GLOBAL_WORKER_LIMIT
+        global GLOBAL_WORKER_LIMIT, _GLOBAL_WORKER_LIMIT_SIZE
         max_global = self.config.get("ingestion", {}).get("concurrency", {}).get("global_max_workers", 10)
-        if GLOBAL_WORKER_LIMIT is None or GLOBAL_WORKER_LIMIT._value != max_global:
-            GLOBAL_WORKER_LIMIT = threading.Semaphore(max_global)
-            log_ingest_online("INFO", f"Global Ingestion Semaphore initialized with {max_global} slots.")
+        with _GLOBAL_WORKER_LIMIT_LOCK:
+            # Available permits decrease while workers run; they are not the
+            # configured capacity. Keep sharing that same limit between runs.
+            if GLOBAL_WORKER_LIMIT is None or _GLOBAL_WORKER_LIMIT_SIZE != max_global:
+                GLOBAL_WORKER_LIMIT = threading.Semaphore(max_global)
+                _GLOBAL_WORKER_LIMIT_SIZE = max_global
+                log_ingest_online("INFO", f"Global Ingestion Semaphore initialized with {max_global} slots.")
+            self.worker_limit = GLOBAL_WORKER_LIMIT
 
     def run(self) -> dict:
 
@@ -278,7 +293,7 @@ class ExternalIngestor:
             return True, url, item_stats, []
 
 
-        with GLOBAL_WORKER_LIMIT:
+        with self.worker_limit:
 
             wait_time = random.uniform(jitter_range[0], jitter_range[1])
             time.sleep(wait_time)
@@ -365,18 +380,13 @@ class ExternalIngestor:
                     target_file = Path(f_path)
 
                     process_metadata = _online_process_metadata(result.get('metadata') or {}, self.links_file.stem, entry.metadata())
-                    import inspect
-                    p_kwargs = {
-                        "metadata": process_metadata,
-                        "delete_source": True,
-                        "sync_index": False,
-                    }
-                    if "ctx" in inspect.signature(process_file).parameters:
-                        p_kwargs["ctx"] = self.ctx
                     process_success, msg, idx_data = process_file(
                         target_file,
                         self.config,
-                        **p_kwargs
+                        metadata=process_metadata,
+                        delete_source=True,
+                        sync_index=False,
+                        ctx=self.ctx,
                     )
 
                     if process_success:
@@ -399,10 +409,14 @@ class ExternalIngestor:
 
                     if batch_data and batch_protected:
                         rolled_back = self._rollback_batch(batch_data)
-                        item_stats["processed"] = max(0, item_stats["processed"] - rolled_back)
-                        log_ingest_online("WARNING", "Rolled back partial URL ingest", url=url, platform=platform, rolled_back=rolled_back)
+                        if rolled_back is not None:
+                            item_stats["processed"] = max(0, item_stats["processed"] - rolled_back)
+                            log_ingest_online("WARNING", "Rolled back partial URL ingest", url=url, platform=platform, rolled_back=rolled_back)
+                            batch_data = []
                     self._log_failure(url, "Pipeline Error during file processing")
-                    return False, url, item_stats, [] if batch_protected else batch_data
+                    # A failed rollback leaves the previously committed items
+                    # in SQLite. Still publish them to the normal batch index.
+                    return False, url, item_stats, batch_data
 
                 if is_pixiv:
                     log_ingest_online("INFO", "Pixiv URL processed successfully", url=url, processed=len(batch_data))
@@ -507,11 +521,13 @@ class ExternalIngestor:
         finally:
             conn.close()
 
-    def _rollback_batch(self, batch_data: List[dict]) -> int:
-        conn = connect_database() if self.ctx is None else connect_database(ctx=self.ctx)
-        rolled_back = 0
+    def _rollback_batch(self, batch_data: List[dict]) -> int | None:
+        conn = None
         removed_indexes = []
+        cleanup_paths = []
+        facet_values: set[tuple[str, str]] = set()
         try:
+            conn = connect_database() if self.ctx is None else connect_database(ctx=self.ctx)
             for item in batch_data:
                 file_hash = item.get("file_hash")
                 if not file_hash:
@@ -521,38 +537,58 @@ class ExternalIngestor:
                     'SELECT file_extension, mime_type, storage_id, source_url FROM items WHERE hash = ?',
                     (file_hash,)
                 ).fetchone()
+                if row is None:
+                    continue
 
-                file_extension = row[0] if row else ""
-                mime_type = row[1] if row else ""
-                storage_id = row[2] if row else ""
-                source_url = row[3] if row else ""
+                file_extension, mime_type, storage_id, source_url = row
+                if not removed_indexes:
+                    ensure_metadata_schema(conn)
+                facet_values.update(_item_facet_values(conn, file_hash))
                 conn.execute('DELETE FROM items WHERE hash = ?', (file_hash,))
                 removed_indexes.append({"hash": file_hash, "source_url": source_url})
 
+                paths = []
                 if file_extension:
-                    asset_path = asset_path_for(file_hash, file_extension, mime_type, storage_id=storage_id, ctx=self.ctx)
-                    if asset_path.exists():
-                        asset_path.unlink()
+                    paths.append(asset_path_for(file_hash, file_extension, mime_type, storage_id=storage_id, ctx=self.ctx))
 
                 if storage_id:
-                    note_path = note_path_for(file_hash, storage_id=storage_id, ctx=self.ctx)
-                    if note_path.exists():
-                        note_path.unlink()
-                    wd_path = wd_tag_cache_path_for(file_hash, storage_id=storage_id, ctx=self.ctx)
-                    if wd_path.exists():
-                        wd_path.unlink()
+                    paths.extend((
+                        note_path_for(file_hash, storage_id=storage_id, ctx=self.ctx),
+                        wd_tag_cache_path_for(file_hash, storage_id=storage_id, ctx=self.ctx),
+                        thumbnail_path_for(file_hash, storage_id, ctx=self.ctx),
+                        video_thumbnail_path_for(file_hash, storage_id, ctx=self.ctx),
+                    ))
+                cleanup_paths.append((storage_id, paths))
 
-                rolled_back += 1
-
+            # Files cannot be restored by SQLite rollback. Delete them only
+            # after the database confirms that the batch removal is durable.
+            if removed_indexes:
+                refresh_metadata_facet_counts_for_values(conn, facet_values)
+                refresh_metadata_index_counters(conn)
             conn.commit()
-            search_manager.remove_indexes_batch(removed_indexes, ctx=self.ctx)
-            return rolled_back
         except Exception as e:
-            conn.rollback()
+            if conn is not None:
+                conn.rollback()
             log_ingest_online("ERROR", "Rollback failed", error=str(e))
-            return rolled_back
+            return None
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
+
+        try:
+            search_manager.remove_indexes_batch(removed_indexes, ctx=self.ctx)
+        except Exception as e:
+            log_ingest_online("ERROR", "Batch rollback committed but RAM cleanup failed", error=str(e))
+
+        for storage_id, paths in cleanup_paths:
+            # Wait for any thumbnail already being published before unlinking.
+            with storage_lifecycle_lock(storage_id, ctx=self.ctx):
+                for path in paths:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as e:
+                        log_ingest_online("WARNING", "Batch rollback committed but file cleanup failed", path=str(path), error=str(e))
+        return len(removed_indexes)
 
     def _log_failure(self, url: str, reason: str):
 

@@ -1755,7 +1755,7 @@ def test_delete_item_removes_ram_indexes(monkeypatch, tmp_path):
     removed = []
 
     class FakeSearchManager:
-        def remove_indexes_batch(self, items):
+        def remove_indexes_batch(self, items, ctx=None):
             removed.extend(items)
 
     monkeypatch.setattr(api.library, "search_manager", FakeSearchManager())
@@ -2258,7 +2258,7 @@ def test_ingest_seeds_markdown_artist_from_metadata_and_reindexes(monkeypatch, t
     monkeypatch.setattr(processor, "calculate_phash", lambda path: None)
     monkeypatch.setattr(processor, "calculate_tiles", lambda path: [])
     monkeypatch.setattr(processor, "tag_media", lambda *args, **kwargs: TagResult())
-    monkeypatch.setattr(processor, "_pending_review_match", lambda file_hash: None)
+    monkeypatch.setattr(processor, "_pending_review_match", lambda file_hash, ctx=None: None)
     monkeypatch.setattr(processor, "atomic_write_text", record_atomic_write)
 
     ok, _, idx_data = processor.process_file(
@@ -2386,7 +2386,7 @@ def test_ingest_index_update_ignores_wd_tagging_status(monkeypatch, tmp_path):
     monkeypatch.setattr(processor, "calculate_phash", lambda path: None)
     monkeypatch.setattr(processor, "calculate_tiles", lambda path: [])
     monkeypatch.setattr(processor, "tag_media", lambda *args, **kwargs: TagResult())
-    monkeypatch.setattr(processor, "_pending_review_match", lambda file_hash: None)
+    monkeypatch.setattr(processor, "_pending_review_match", lambda file_hash, ctx=None: None)
     monkeypatch.setattr(processor.search_manager, "update_indexes", lambda **kwargs: index_calls.append(kwargs))
 
     ok, _, idx_data = processor.process_file(
@@ -4923,48 +4923,9 @@ def test_artist_merge_rejects_invalid_sources(monkeypatch, tmp_path):
     assert placeholder_target.value.status_code == 400
 
 
-def test_search_manager_query_sees_pending_during_vp_rebuild(monkeypatch, tmp_path):
-    search_manager_module, = fresh_backend(monkeypatch, tmp_path, "db.search_manager")
-    manager = search_manager_module.SearchManager()
-    manager.video_tree = search_manager_module.VPTreeSearcher(search_manager_module._cosine_dist)
-    manager.audio_tree = search_manager_module.VPTreeSearcher(search_manager_module._hamming_dist_audio)
-    manager.global_tree = search_manager_module.BKTreeSearcher()
-    manager.tile_tree = search_manager_module.BKTreeSearcher()
-    manager.url_registry = search_manager_module.URLRegistry()
-
-    import numpy as np
-
-    sig = np.array([1.0, 0.0], dtype=np.float32).tobytes()
-    manager.video_tree.add("video-hash", sig)
-    started = threading.Event()
-    release = threading.Event()
-    original_make_tree = search_manager_module.VPTreeSearcher._make_tree
-
-    def slow_make_tree(self, items):
-        started.set()
-        release.wait(timeout=2)
-        return original_make_tree(self, items)
-
-    monkeypatch.setattr(search_manager_module.VPTreeSearcher, "_make_tree", slow_make_tree)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(manager.rebuild_deferred_indexes)
-        assert started.wait(timeout=2)
-        matches = manager.query_video(None, sig, ai_threshold=0.01)
-        release.set()
-        future.result(timeout=2)
-
-    assert matches == [("video-hash", 1.0, "Semantic")]
-
-
 def test_search_manager_removes_deleted_hashes_and_urls(monkeypatch, tmp_path):
     search_manager_module, = fresh_backend(monkeypatch, tmp_path, "db.search_manager")
     manager = search_manager_module.SearchManager()
-    manager.video_tree = search_manager_module.VPTreeSearcher(search_manager_module._cosine_dist)
-    manager.audio_tree = search_manager_module.VPTreeSearcher(search_manager_module._hamming_dist_audio)
-    manager.global_tree = search_manager_module.BKTreeSearcher()
-    manager.tile_tree = search_manager_module.BKTreeSearcher()
-    manager.url_registry = search_manager_module.URLRegistry()
 
     import numpy as np
 
@@ -4972,7 +4933,6 @@ def test_search_manager_removes_deleted_hashes_and_urls(monkeypatch, tmp_path):
     tile_phash = "f" * 16
     sig = np.array([1.0, 0.0], dtype=np.float32).tobytes()
     manager.update_indexes("deleted-hash", phash, "https://example.test/item", [(0, tile_phash)], visual_embedding=sig)
-    manager.rebuild_deferred_indexes()
 
     assert manager.query_image(phash)
     assert manager.query_image(tile_phash)
@@ -4987,74 +4947,15 @@ def test_search_manager_removes_deleted_hashes_and_urls(monkeypatch, tmp_path):
     assert not manager.url_exists("https://example.test/item")
 
 
-def test_search_manager_vp_delete_defers_rebuild_outside_remove(monkeypatch, tmp_path):
-    search_manager_module, = fresh_backend(monkeypatch, tmp_path, "db.search_manager")
-    manager = search_manager_module.SearchManager()
-    manager.video_tree = search_manager_module.VPTreeSearcher(search_manager_module._cosine_dist)
-    manager.audio_tree = search_manager_module.VPTreeSearcher(search_manager_module._hamming_dist_audio)
-    manager.global_tree = search_manager_module.BKTreeSearcher()
-    manager.tile_tree = search_manager_module.BKTreeSearcher()
-    manager.url_registry = search_manager_module.URLRegistry()
-
-    import numpy as np
-
-    sig = np.array([1.0, 0.0], dtype=np.float32).tobytes()
-    manager.update_indexes("deleted-video", None, None, visual_embedding=sig)
-    manager.rebuild_deferred_indexes()
-    assert manager.query_video(None, sig, ai_threshold=0.01)
-
-    def fail_sync_rebuild(self, items):
-        raise AssertionError("remove should not rebuild VP tree synchronously")
-
-    scheduled = []
-    monkeypatch.setattr(search_manager_module.VPTreeSearcher, "_make_tree", fail_sync_rebuild)
-    monkeypatch.setattr(manager, "_rebuild_deferred_indexes_async", lambda reason: scheduled.append(reason))
-
-    result = manager.remove_indexes_batch([{"hash": "deleted-video"}])
-
-    assert result["video"]["deferred"] is True
-    assert scheduled == ["batch_remove"]
-    assert manager.query_video(None, sig, ai_threshold=0.01) == []
-
-
-def test_vp_rebuild_apply_does_not_resurrect_concurrent_delete(monkeypatch, tmp_path):
-    search_manager_module, = fresh_backend(monkeypatch, tmp_path, "db.search_manager")
-    tree = search_manager_module.VPTreeSearcher(search_manager_module._cosine_dist)
-
-    import numpy as np
-
-    sig_x = np.array([1.0, 0.0], dtype=np.float32).tobytes()
-    sig_y = np.array([0.0, 1.0], dtype=np.float32).tobytes()
-    tree.add("x", sig_x)
-    tree.add("y", sig_y)
-    tree.build_index()
-    tree.dirty = True
-
-    plan = tree.rebuild_plan()
-    replacement = tree.build_replacement(plan)
-
-    removed = tree.remove_hashes({"y"})
-    assert removed["removed"] == 1
-
-    applied = tree.apply_replacement(plan, replacement)
-    assert applied["stale"] is True
-    assert [item_hash for item_hash, _ in tree.indexed_items] == ["x"]
-    assert tree.query(sig_y, 0.01) == []
-
-    tree.build_index()
-    assert tree.query(sig_x, 0.01) == [("x", 0.0)]
-    assert tree.query(sig_y, 0.01) == []
-
-
 def test_find_visual_duplicate_stops_tile_queries_after_first_match(monkeypatch, tmp_path):
     processor, = fresh_backend(monkeypatch, tmp_path, "processor")
     calls = []
 
     class FakeSearchManager:
-        def query_image(self, phash, threshold):
+        def query_image(self, phash, threshold, ctx=None):
             return []
 
-        def query_global_only(self, phash, threshold):
+        def query_global_only(self, phash, threshold, ctx=None):
             calls.append(phash)
             return [("match-hash", 1)]
 
@@ -5731,18 +5632,16 @@ def test_video_frame_extraction_discards_stderr(monkeypatch, tmp_path):
 
 
 def test_search_manager_runtime_logs_route_to_system(monkeypatch, tmp_path):
-    search_manager_module, = fresh_backend(monkeypatch, tmp_path, "db.search_manager")
+    search_manager_module, db = fresh_backend(monkeypatch, tmp_path, "db.search_manager", "db.sqlite_operator")
     calls = []
 
     monkeypatch.setattr(search_manager_module, "log_system", lambda level, message, **kwargs: calls.append((level, message, kwargs)))
-    monkeypatch.setattr(search_manager_module, "get_all_urls", lambda conn: [])
-    monkeypatch.setattr(search_manager_module, "get_all_phashes", lambda conn: [])
-    monkeypatch.setattr(search_manager_module, "get_all_tiles", lambda conn: [])
-    monkeypatch.setattr(search_manager_module, "get_all_video_signatures", lambda conn: [])
-
     manager = search_manager_module.SearchManager()
-    manager.is_hydrated = False
-    manager.hydrate(object())
+    conn = insert_mock_item(db, "hash")
+    try:
+        manager.hydrate(conn)
+    finally:
+        conn.close()
     manager.update_indexes_batch([{"file_hash": "hash", "phash": None, "url": "", "tiles": []}])
 
     messages = [call[1] for call in calls]

@@ -52,7 +52,7 @@ from metadata_maintenance import (
 )
 from platforms import list_platforms, resolve_platform_label
 from pydantic import BaseModel
-from runtime_context import WorkspaceContext
+from runtime_context import WorkspaceContext, get_runtime_context
 from tagging import load_tag_cache, tag_media
 from thumbnails import ThumbnailBusyError, get_or_generate_thumbnail
 from topics import ensure_topic_file, slugify_topic_label
@@ -1200,10 +1200,7 @@ def _delete_item_row_locked(
 
     index_payload = {"hash": item_hash, "source_url": row[3] or ""}
     if remove_indexes:
-        if ctx is None:
-            search_manager.remove_indexes_batch([index_payload])
-        else:
-            search_manager.remove_indexes_batch([index_payload], ctx=ctx)
+        search_manager.remove_indexes_batch([index_payload], ctx=ctx)
 
     cleanup_errors = _remove_staged_cleanup_paths(
         item_hash,
@@ -1239,7 +1236,8 @@ def _delete_item_row(cursor, conn, item_hash: str, remove_indexes: bool = True, 
     return result
 
 def _delete_item_after_replacement(item_hash: str, ctx: WorkspaceContext | None = None):
-    conn = init_database(ctx=ctx)
+    ctx = ctx or get_runtime_context()
+    conn = connect_database(ctx=ctx)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT file_extension, mime_type, storage_id, source_url FROM items WHERE hash = ?", (item_hash,))
@@ -1265,10 +1263,11 @@ def _delete_item_after_replacement(item_hash: str, ctx: WorkspaceContext | None 
         conn.close()
 
 def _delete_item_sync(item_hash: str):
-    conn = init_database()
+    ctx = get_runtime_context()
+    conn = connect_database(ctx=ctx)
     cursor = conn.cursor()
     try:
-        result = _delete_item_row(cursor, conn, item_hash)
+        result = _delete_item_row(cursor, conn, item_hash, ctx=ctx)
         if result["status"] == "missing":
             raise HTTPException(status_code=404)
         if result["status"] == "cleanup_failed":
@@ -1291,7 +1290,8 @@ def _bulk_delete_items_sync(hashes: list[str]):
             unique_hashes.append(item_hash)
             seen.add(item_hash)
 
-    conn = init_database()
+    ctx = get_runtime_context()
+    conn = connect_database(ctx=ctx)
     cursor = conn.cursor()
     deleted = []
     missing = []
@@ -1299,7 +1299,7 @@ def _bulk_delete_items_sync(hashes: list[str]):
     index_payloads = []
     try:
         for item_hash in unique_hashes:
-            result = _delete_item_row(cursor, conn, item_hash, remove_indexes=False)
+            result = _delete_item_row(cursor, conn, item_hash, remove_indexes=False, ctx=ctx)
             if result["status"] == "missing":
                 missing.append(item_hash)
             elif result["status"] == "cleanup_failed":
@@ -1308,7 +1308,7 @@ def _bulk_delete_items_sync(hashes: list[str]):
                 deleted.append(item_hash)
                 failed_cleanup.extend(result["cleanup_errors"])
                 index_payloads.append(result.get("index") or {"hash": item_hash})
-        search_manager.remove_indexes_batch(index_payloads)
+        search_manager.remove_indexes_batch(index_payloads, ctx=ctx)
         return {
             "status": "success",
             "requested_count": len(unique_hashes),
