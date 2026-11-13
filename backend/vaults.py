@@ -551,14 +551,12 @@ def _copy_if_exists(source: Path, target: Path) -> bool:
     return True
 
 
-def _item_paths(root: Path, item_hash: str, storage_id: str, ext: str, mime_type: str) -> dict[str, Path]:
+def _item_paths(root: Path, item_hash: str, storage_id: str, ext: str) -> dict[str, Path]:
     shard = str(item_hash)[:2] or "00"
-    video_suffix = "_video" if str(mime_type or "").startswith("video/") else ""
     return {
         "asset": root / "vault" / "assets" / shard / f"{storage_id}{ext}",
         "note": root / "vault" / "notes" / shard / f"{storage_id}.md",
         "wd": root / "wd-tags" / shard / f"{storage_id}.json",
-        "thumb": root / "ui_cache" / "thumbnails" / shard / f"{storage_id}{video_suffix}.jpg",
     }
 
 
@@ -720,9 +718,8 @@ def _copy_merge_items(target_conn: sqlite3.Connection, target_root: Path, source
                     raise ValueError(f"source item has no storage ID: {source_id}/{item_hash}")
                 new_storage_id = allocate_storage_id(target_conn)
                 ext = str(item.get("file_extension") or "")
-                mime_type = str(item.get("mime_type") or "")
-                old_paths = _item_paths(source_root, item_hash, old_storage_id, ext, mime_type)
-                new_paths = _item_paths(target_root, item_hash, new_storage_id, ext, mime_type)
+                old_paths = _item_paths(source_root, item_hash, old_storage_id, ext)
+                new_paths = _item_paths(target_root, item_hash, new_storage_id, ext)
                 if not _copy_if_exists(old_paths["asset"], new_paths["asset"]):
                     raise ValueError(f"source asset is missing: {old_paths['asset']}")
                 _copy_if_exists(old_paths["wd"], new_paths["wd"])
@@ -798,19 +795,20 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
     from thumbnail_store import list_thumbnail_fingerprints
     from thumbnails import thumbnail_db_path_for_vault
 
-    cached_thumbnail_fingerprints = list_thumbnail_fingerprints(thumbnail_db_path_for_vault(root))
-    expected = {"asset": set(), "note": set(), "wd": set(), "thumb": set()}
-    cached_thumb_paths = set()
+    thumb_db = thumbnail_db_path_for_vault(root)
+    cached_thumbnail_fingerprints = list_thumbnail_fingerprints(thumb_db)
+    expected = {"asset": set(), "note": set(), "wd": set()}
+    missing_thumbs = []
     failed_thumbs = []
     
     for item in items:
-        paths = _item_paths(root, item["hash"], item["storage_id"], item["ext"], item["mime_type"])
+        paths = _item_paths(root, item["hash"], item["storage_id"], item["ext"])
         expected["asset"].add(paths["asset"].resolve())
         expected["note"].add(paths["note"].resolve())
         mime = str(item.get("mime_type") or "").lower()
         if mime.startswith("image/") or mime.startswith("video/"):
             expected["wd"].add(paths["wd"].resolve())
-            thumb_path = paths["thumb"].resolve()
+            cached = False
             fingerprint = cached_thumbnail_fingerprints.get(str(item["storage_id"]))
             if fingerprint is not None:
                 try:
@@ -818,22 +816,25 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
                 except OSError:
                     pass
                 else:
-                    if fingerprint == (source_stat.st_mtime_ns, source_stat.st_size):
-                        cached_thumb_paths.add(thumb_path)
-            if item.get("thumbnail_status") == "failed" and thumb_path not in cached_thumb_paths:
+                    cached = fingerprint == (source_stat.st_mtime_ns, source_stat.st_size)
+            if cached:
+                continue
+            entry_label = f"{thumb_db} (storage ID: {item['storage_id']})"
+            if item.get("thumbnail_status") == "failed":
                 failed_thumbs.append({
                     "hash": item["hash"],
-                    "path": str(paths["thumb"]),
+                    "path": entry_label,
                     "error": item.get("thumbnail_error") or "Unknown thumbnail generation failure"
                 })
             else:
-                expected["thumb"].add(thumb_path)
+                missing_thumbs.append(entry_label)
 
     missing = {key: [] for key in expected}
     for key, paths in expected.items():
         for path in sorted(paths):
-            if not path.exists() and not (key == "thumb" and path in cached_thumb_paths):
+            if not path.exists():
                 missing[key].append(str(path))
+    missing["thumb"] = sorted(missing_thumbs)
 
     def existing_files(folder: Path, suffix: str | None = None) -> set[Path]:
         if not folder.exists():
@@ -846,11 +847,9 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
     actual_assets = existing_files(root / "vault" / "assets")
     actual_notes = existing_files(root / "vault" / "notes", ".md")
     actual_wd = existing_files(root / "wd-tags", ".json")
-    actual_thumbs = existing_files(root / "ui_cache" / "thumbnails", ".jpg")
     orphan_assets = sorted(str(path) for path in actual_assets - expected["asset"])
     orphan_notes = sorted(str(path) for path in actual_notes - expected["note"])
     orphan_wd = sorted(str(path) for path in actual_wd - expected["wd"])
-    orphan_thumbs = sorted(str(path) for path in actual_thumbs - expected["thumb"])
     thumbnail_ids = {str(item["storage_id"]) for item in items}
     orphan_thumbnail_rows = sorted(cached_thumbnail_fingerprints.keys() - thumbnail_ids)
 
@@ -913,7 +912,7 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
             workspace_dictionary_drift["error"] = "workspace dictionary unavailable"
 
     for item in items:
-        asset_path = _item_paths(root, item["hash"], item["storage_id"], item["ext"], item["mime_type"])["asset"]
+        asset_path = _item_paths(root, item["hash"], item["storage_id"], item["ext"])["asset"]
         if not asset_path.exists():
             continue
         digest = hashlib.sha256()
@@ -936,7 +935,7 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
 
     issue_count = (
         sum(len(paths) for paths in missing.values())
-        + len(orphan_assets) + len(orphan_notes) + len(orphan_wd) + len(orphan_thumbs)
+        + len(orphan_assets) + len(orphan_notes) + len(orphan_wd)
         + len(orphan_thumbnail_rows)
         + sum(stale_index_rows.values())
         + len(bad_storage_ids) + len(hash_mismatches)
@@ -965,7 +964,7 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
             "assets": orphan_assets,
             "notes": orphan_notes,
             "wd_cache": orphan_wd,
-            "thumbnails": orphan_thumbs,
+            "thumbnails": [],  # Kept for compatibility with existing health consumers.
             "thumbnail_db_rows": orphan_thumbnail_rows,
         },
         "stale_index_rows": stale_index_rows,
@@ -991,7 +990,7 @@ def _health_category_counts(report: dict) -> dict:
         "missing_wd_cache": len(missing.get("wd") or []),
         "missing_thumbnails": len(missing.get("thumb") or []),
         "orphan_assets_notes": len(orphans.get("assets") or []) + len(orphans.get("notes") or []),
-        "orphan_derived_cache": sum(len(orphans.get(key) or []) for key in ("wd_cache", "thumbnails", "thumbnail_db_rows")),
+        "orphan_derived_cache": sum(len(orphans.get(key) or []) for key in ("wd_cache", "thumbnail_db_rows")),
         "stale_index_rows": sum(int(value or 0) for value in stale.values()),
         "facet_drift": len(report.get("facet_drift") or []),
         "bad_storage_ids": len(report.get("bad_storage_ids") or []),
@@ -1191,12 +1190,11 @@ def repair_vault(vault_id: str, actions: list[str] | None = None, confirm_destru
         from thumbnails import thumbnail_db_path_for_vault
 
         removed = 0
-        for key in ("wd_cache", "thumbnails"):
-            for path_text in before["orphans"].get(key, []):
-                path = Path(path_text)
-                if path.exists():
-                    path.unlink()
-                    removed += 1
+        for path_text in before["orphans"].get("wd_cache", []):
+            path = Path(path_text)
+            if path.exists():
+                path.unlink()
+                removed += 1
         if db_path.is_file() and before["orphans"]["thumbnail_db_rows"]:
             thumb_db = thumbnail_db_path_for_vault(root)
             with closing(sqlite3.connect(db_path)) as conn:
@@ -1665,7 +1663,6 @@ def migrate_legacy_layout(copy: bool = True, overwrite: bool = False, ctx: Works
         source_dir_for("db", "data/db/lmz_main.db", parent_of_file=True): target_root / "db",
         source_dir_for("review", "data/review"): target_root / "review",
         source_dir_for("wd_tags", "data/wd-tags"): target_root / "wd-tags",
-        source_dir_for("thumbnails", "data/ui_cache/thumbnails"): target_root / "ui_cache" / "thumbnails",
         source_dir_for("logs", "logs"): target_root / "logs",
         source_dir_for("queues", "data/queues"): target_root / "queues",
         source_dir_for("batches", "data/batches"): target_root / "batches",

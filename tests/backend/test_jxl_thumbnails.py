@@ -67,7 +67,6 @@ def test_generated_jxl_thumbnail_reports_configured_format_and_pixels(tmp_path, 
     monkeypatch.setattr(thumbnails, "thumbnail_db_path", lambda *_a, **_k: cache_db)
     monkeypatch.setattr(thumbnails, "read_thumbnail", lambda *_a, **_k: None)
     monkeypatch.setattr(thumbnails, "write_thumbnail", lambda *_a, **_k: True)
-    monkeypatch.setattr(thumbnails, "_expected_thumbnail_path", lambda *_a, **_k: tmp_path / "absent.jpg")
     monkeypatch.setattr(thumbnails, "_configured_format", lambda: "png")
 
     data, mime_type = thumbnails.ensure_thumbnail(

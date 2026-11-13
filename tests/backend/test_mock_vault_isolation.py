@@ -166,7 +166,7 @@ def test_config_override_resolves_paths_inside_mock_vault(monkeypatch, tmp_path)
     assert utils.DB_PATH == tmp_path / "mock-vault" / "data" / "vaults" / "default" / "db" / "lmz_main.db"
     assert utils.LOCAL_INGEST_DIR == tmp_path / "mock-vault" / "data" / "vaults" / "default" / "local_ingest"
     assert utils.ONLINE_INGEST_DIR == tmp_path / "mock-vault" / "data" / "vaults" / "default" / "online_ingest"
-    assert utils.THUMBNAILS_DIR == tmp_path / "mock-vault" / "data" / "vaults" / "default" / "ui_cache" / "thumbnails"
+    assert not hasattr(utils, "THUMBNAILS_DIR")
     assert utils.TOPICS_DIR == tmp_path / "mock-vault" / "data" / "topics"
     assert utils.platform_cookie_path("x") == tmp_path / "app-auth" / "x" / "cookies.txt"
     assert str(ROOT / "data") not in str(utils.VAULT_DIR)
@@ -3762,16 +3762,14 @@ def test_delete_and_replace_cleanup_remove_thumbnails(monkeypatch, tmp_path):
         asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
         note = utils.note_path_for(item_hash, storage_id)
         wd = utils.wd_tag_cache_path_for(item_hash, storage_id)
-        thumb = thumbnails.thumbnail_path_for(item_hash, storage_id)
         for path, data in (
             (asset, b"asset"),
             (note, b"---\n---\n"),
             (wd, b"{}"),
-            (thumb, b"thumb"),
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-        return asset, note, wd, thumb
+        return asset, note, wd
 
     replace_paths = write_item_files(replace_hash, replace_storage)
     delete_paths = write_item_files(delete_hash, delete_storage)
@@ -3814,8 +3812,7 @@ def test_delete_stage_failure_keeps_db_row_and_files(monkeypatch, tmp_path):
     asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
     note = utils.note_path_for(item_hash, storage_id)
     wd = utils.wd_tag_cache_path_for(item_hash, storage_id)
-    thumb = thumbnails.thumbnail_path_for(item_hash, storage_id)
-    for path, data in ((asset, b"asset"), (note, b"---\n---\n"), (wd, b"{}"), (thumb, b"thumb")):
+    for path, data in ((asset, b"asset"), (note, b"---\n---\n"), (wd, b"{}")):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
@@ -3837,7 +3834,7 @@ def test_delete_stage_failure_keeps_db_row_and_files(monkeypatch, tmp_path):
     assert result["status"] == "warning"
     assert result["deleted"] is False
     assert db_row is not None
-    assert all(path.exists() for path in (asset, note, wd, thumb))
+    assert all(path.exists() for path in (asset, note, wd))
 
 
 def test_delete_db_failure_restores_staged_files(monkeypatch, tmp_path):
@@ -3856,8 +3853,7 @@ def test_delete_db_failure_restores_staged_files(monkeypatch, tmp_path):
     asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
     note = utils.note_path_for(item_hash, storage_id)
     wd = utils.wd_tag_cache_path_for(item_hash, storage_id)
-    thumb = thumbnails.thumbnail_path_for(item_hash, storage_id)
-    for path, data in ((asset, b"asset"), (note, b"---\n---\n"), (wd, b"{}"), (thumb, b"thumb")):
+    for path, data in ((asset, b"asset"), (note, b"---\n---\n"), (wd, b"{}")):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
@@ -3872,7 +3868,7 @@ def test_delete_db_failure_restores_staged_files(monkeypatch, tmp_path):
     assert result["status"] == "warning"
     assert result["deleted"] is False
     assert db_row is not None
-    assert all(path.exists() for path in (asset, note, wd, thumb))
+    assert all(path.exists() for path in (asset, note, wd))
 
 
 def test_delete_final_trash_cleanup_failure_reports_error(monkeypatch, tmp_path):
@@ -3891,8 +3887,7 @@ def test_delete_final_trash_cleanup_failure_reports_error(monkeypatch, tmp_path)
     asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
     note = utils.note_path_for(item_hash, storage_id)
     wd = utils.wd_tag_cache_path_for(item_hash, storage_id)
-    thumb = thumbnails.thumbnail_path_for(item_hash, storage_id)
-    for path, data in ((asset, b"asset"), (note, b"---\n---\n"), (wd, b"{}"), (thumb, b"thumb")):
+    for path, data in ((asset, b"asset"), (note, b"---\n---\n"), (wd, b"{}")):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
@@ -3916,7 +3911,7 @@ def test_delete_final_trash_cleanup_failure_reports_error(monkeypatch, tmp_path)
     assert db_row is None
     assert result["cleanup_errors"]
     assert all(".delete-trash" in error["path"] for error in result["cleanup_errors"])
-    assert not any(path.exists() for path in (asset, note, wd, thumb))
+    assert not any(path.exists() for path in (asset, note, wd))
 
 
 def test_replace_final_trash_cleanup_failure_reports_error(monkeypatch, tmp_path):
@@ -4024,8 +4019,7 @@ def test_successful_delete_does_not_leave_vault_health_orphans(monkeypatch, tmp_
     asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
     note = utils.note_path_for(item_hash, storage_id)
     wd = utils.wd_tag_cache_path_for(item_hash, storage_id)
-    thumb = thumbnails.thumbnail_path_for(item_hash, storage_id)
-    for path, data in ((asset, b"asset"), (note, b"---\n---\n"), (wd, b"{}"), (thumb, b"thumb")):
+    for path, data in ((asset, b"asset"), (note, b"---\n---\n"), (wd, b"{}")):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     monkeypatch.setattr(api_library.search_manager, "remove_indexes_batch", lambda *args, **kwargs: None)
@@ -4058,12 +4052,9 @@ def test_delete_stages_all_storage_owned_files_across_shards(monkeypatch, tmp_pa
         utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id),
         utils.note_path_for(item_hash, storage_id),
         utils.wd_tag_cache_path_for(item_hash, storage_id),
-        thumbnails.thumbnail_path_for(item_hash, storage_id),
         vault.assets_dir / "aa" / f"{storage_id}.png",
         vault.notes_dir / "bb" / f"{storage_id}.md",
         vault.wd_tags_dir / "cc" / f"{storage_id}.json",
-        vault.thumbnails_dir / "dd" / f"{storage_id}.jpg",
-        vault.thumbnails_dir / "ee" / f"{storage_id}_video.jpg",
     ]
     for path in paths:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -4139,6 +4130,7 @@ def test_delete_waits_for_inflight_thumbnail_and_removes_published_file(monkeypa
     asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
     asset.parent.mkdir(parents=True, exist_ok=True)
     asset.write_bytes(b"asset")
+    source = asset.stat()
     started = threading.Event()
     release = threading.Event()
 
@@ -4169,7 +4161,7 @@ def test_delete_waits_for_inflight_thumbnail_and_removes_published_file(monkeypa
 
     assert result["status"] == "success"
     assert not asset.exists()
-    assert not thumbnails.thumbnail_path_for(item_hash, storage_id).exists()
+    assert thumbnails.read_thumbnail(thumbnails.thumbnail_db_path(), storage_id, source.st_mtime_ns, source.st_size) is None
 
 
 def test_wd_cache_publication_refuses_deleted_owner(monkeypatch, tmp_path):
@@ -5435,12 +5427,14 @@ def test_thumbnail_repair_uses_shared_helper_and_skips_fresh(monkeypatch, tmp_pa
         asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
         asset.parent.mkdir(parents=True, exist_ok=True)
         asset.write_bytes(b"asset")
-    fresh_thumb = thumbnails.thumbnail_path_for(fresh_hash, fresh_storage_id)
-    fresh_thumb.parent.mkdir(parents=True, exist_ok=True)
-    fresh_thumb.write_bytes(b"thumb")
+    fresh_asset = utils.asset_path_for(fresh_hash, ".jpg", "image/jpeg", storage_id=fresh_storage_id)
+    source = fresh_asset.stat()
+    assert thumbnails.write_thumbnail(thumbnails.thumbnail_db_path(), fresh_storage_id, source.st_mtime_ns,
+                                      source.st_size, b"thumb", "image/jpeg")
     calls = []
 
-    def fake_ensure(item_hash, extension, mime_type, wait=True, storage_id=None):
+    def fake_ensure(item_hash, extension, mime_type, wait=True, storage_id=None, *, ctx=None, rebuild=False, require_store=False):
+        assert require_store
         calls.append((item_hash, extension, mime_type, wait, storage_id))
         return b"thumb", "image/jpeg"
 
@@ -5454,107 +5448,49 @@ def test_thumbnail_repair_uses_shared_helper_and_skips_fresh(monkeypatch, tmp_pa
     conn.close()
 
 
-def test_thumbnail_repair_preserves_legacy_image_and_video_copies_even_when_fresh(monkeypatch, tmp_path):
-    utils, sqlite_operator, thumbnails = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails")
-    image_hash = "c1" * 32
-    video_hash = "c2" * 32
-    conn = insert_mock_item(sqlite_operator, image_hash)
-    image_storage = storage_id_for(conn, image_hash)
-    video_storage = sqlite_operator.allocate_storage_id(conn)
-    conn.execute(
-        """
-        INSERT INTO items(hash, storage_id, original_filename, file_extension, mime_type, size_bytes, date_added, source_url, source_url_norm, platform, source_artist, phash)
-        VALUES (?, ?, ?, '.mp4', 'video/mp4', 10, '2026-01-04 00:00:00', '', '', 'local', 'DB Artist', '')
-        """,
-        (video_hash, video_storage, f"{video_hash}.mp4"),
+def test_thumbnail_api_ignores_legacy_files_and_serves_sqlite_blob(monkeypatch, tmp_path):
+    utils, db, thumbnails, vaults = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails", "vaults"
     )
-    conn.commit()
-    for item_hash, storage_id, extension, mime_type in (
-        (image_hash, image_storage, ".jpg", "image/jpeg"),
-        (video_hash, video_storage, ".mp4", "video/mp4"),
-    ):
-        asset = utils.asset_path_for(item_hash, extension, mime_type, storage_id=storage_id)
-        asset.parent.mkdir(parents=True, exist_ok=True)
-        asset.write_bytes(b"asset")
-    image_thumb = thumbnails.thumbnail_path_for(image_hash, image_storage)
-    video_thumb = thumbnails.video_thumbnail_path_for(video_hash, video_storage)
-    stale_image = thumbnails._thumbnail_dir() / "aa" / f"{image_storage}.jpg"
-    stale_video = thumbnails._thumbnail_dir() / "bb" / f"{video_storage}_video.jpg"
-    stale_video_image_variant = thumbnails._thumbnail_dir() / "cc" / f"{video_storage}.jpg"
-    for path in (image_thumb, video_thumb, stale_image, stale_video, stale_video_image_variant):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"thumb")
-    now = time.time() + 10
-    os.utime(image_thumb, (now, now))
-    os.utime(video_thumb, (now, now))
-
-    result = thumbnails.repair_missing_thumbnails(conn, limit=10)
-
-    assert result["generated"] == 0
-    assert result["skipped"] == 2
-    assert result["stale_removed"] == 0
-    assert result["cleanup_errors"] == []
-    assert image_thumb.exists()
-    assert video_thumb.exists()
-    assert stale_image.exists()
-    assert stale_video.exists()
-    assert stale_video_image_variant.exists()
-    conn.close()
-
-
-def test_thumbnail_repair_preserves_stale_legacy_copy(monkeypatch, tmp_path):
-    utils, sqlite_operator, thumbnails = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails")
-    item_hash = "c3" * 32
-    conn = insert_mock_item(sqlite_operator, item_hash)
-    storage_id = storage_id_for(conn, item_hash)
-    asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
-    canonical = thumbnails.thumbnail_path_for(item_hash, storage_id)
-    stale = thumbnails._thumbnail_dir() / "dd" / f"{storage_id}.jpg"
-    for path in (asset, canonical, stale):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"data")
-    now = time.time() + 10
-    os.utime(canonical, (now, now))
-    result = thumbnails.repair_missing_thumbnails(conn, limit=10)
-
-    assert result["stale_removed"] == 0
-    assert result["cleanup_errors"] == []
-    assert stale.exists()
-    conn.close()
-
-
-def test_thumbnail_lazy_migration_returns_exact_legacy_bytes_without_deleting_file(monkeypatch, tmp_path):
-    utils, sqlite_operator, thumbnails = fresh_backend(
-        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails"
-    )
-    item_hash = "c5" * 32
-    conn = insert_mock_item(sqlite_operator, item_hash)
-    storage_id = storage_id_for(conn, item_hash)
-    conn.close()
-    asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
-    legacy = thumbnails.thumbnail_path_for(item_hash, storage_id)
-    asset.parent.mkdir(parents=True, exist_ok=True)
-    legacy.parent.mkdir(parents=True, exist_ok=True)
-    asset.write_bytes(b"source")
     from PIL import Image
 
-    from io import BytesIO
+    item_hash = "c5" * 32
+    conn = insert_mock_item(db, item_hash)
+    storage_id = storage_id_for(conn, item_hash)
+    conn.close()
+    asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+    legacy = thumbnails.thumbnail_db_path().parent / "thumbnails" / item_hash[:2] / f"{storage_id}.jpg"
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (8, 8), "red").save(asset)
+    Image.new("RGB", (8, 8), "blue").save(legacy)
+    old_bytes = legacy.read_bytes()
+    assert vaults.audit_vault_health("default")["missing_files"]["thumb"]
 
-    image_data = BytesIO()
-    Image.new("RGB", (8, 8), color="blue").save(image_data, format="JPEG")
-    expected = image_data.getvalue()
-    legacy.write_bytes(expected)
-    now = time.time() + 2
-    os.utime(legacy, (now, now))
+    monkeypatch.setattr(thumbnails, "_configured_format", lambda: "png")
+    app_module = importlib.import_module("api.app")
+    client = TestClient(app_module.app)
+    url = f"/api/thumbnails/{item_hash}"
+    first = client.get(url)
+    assert first.status_code == 200
+    assert first.headers["content-type"] == "image/png"
+    assert first.content.startswith(b"\x89PNG")
+    source = asset.stat()
+    assert thumbnails.read_thumbnail(thumbnails.thumbnail_db_path(), storage_id, source.st_mtime_ns,
+                                     source.st_size) == (first.content, "image/png")
+    assert not vaults.audit_vault_health("default")["missing_files"]["thumb"]
 
-    result = thumbnails.ensure_thumbnail(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+    def must_not_regenerate(*_args):
+        pytest.fail("cache hit must not generate a new thumbnail")
 
-    assert result == (expected, "image/jpeg")
-    assert legacy.read_bytes() == expected
-    cached = thumbnails.read_thumbnail(
-        thumbnails.thumbnail_db_path(), storage_id, asset.stat().st_mtime_ns, asset.stat().st_size
-    )
-    assert cached == result
+    monkeypatch.setattr(thumbnails, "generate_image_thumbnail", must_not_regenerate)
+    assert client.get(url).content == first.content
+    headers = {"X-LMZ-API-KEY": app_module.runtime._api_key()}
+    assert client.delete(f"/api/items/{item_hash}", headers=headers).status_code == 200
+    assert client.get(url).status_code == 404
+    assert thumbnails.read_thumbnail(thumbnails.thumbnail_db_path(), storage_id, source.st_mtime_ns,
+                                     source.st_size) is None
+    assert legacy.read_bytes() == old_bytes
 
 
 def test_thumbnail_generation_returns_bytes_when_cache_write_fails(monkeypatch, tmp_path):
@@ -5576,7 +5512,7 @@ def test_thumbnail_generation_returns_bytes_when_cache_write_fails(monkeypatch, 
 
     assert result[0].startswith(b"\xff\xd8")
     assert result[1] == "image/jpeg"
-    assert not thumbnails.thumbnail_path_for(item_hash, storage_id).exists()
+    assert not thumbnails.thumbnail_db_path().exists()
 
 
 def test_thumbnail_and_wd_repairs_ignore_non_media_rows(monkeypatch, tmp_path):
@@ -5641,8 +5577,8 @@ def test_thumbnail_api_returns_503_when_generation_is_busy(monkeypatch, tmp_path
     assert calls == [(item_hash, *item)]
 
 
-@pytest.mark.parametrize("write_fails", [False, True])
-def test_jxl_gallery_queues_one_thumbnail_and_never_redirects(monkeypatch, tmp_path, write_fails):
+@pytest.mark.parametrize("failure", [None, "store", "decode"])
+def test_jxl_gallery_queues_one_thumbnail_and_never_redirects(monkeypatch, tmp_path, failure):
     from PIL import Image
     from jxl_preview import register_jxl_decoder
 
@@ -5660,12 +5596,16 @@ def test_jxl_gallery_queues_one_thumbnail_and_never_redirects(monkeypatch, tmp_p
     asset = utils.asset_path_for(item_hash, ".jxl", "image/jxl", storage_id)
     asset.parent.mkdir(parents=True, exist_ok=True)
     register_jxl_decoder()
-    Image.new("RGB", (12, 8), "blue").save(asset, format="JXL")
+    if failure == "decode":
+        asset.write_bytes(b"not a JXL")
+    else:
+        Image.new("RGB", (12, 8), "blue").save(asset, format="JXL")
 
     jobs = []
     monkeypatch.setattr(thumbnails._BACKGROUND, "submit", jobs.append)
     monkeypatch.setattr(thumbnails, "_configured_format", lambda: "png")
-    if write_fails:
+    real_write = thumbnails.write_thumbnail
+    if failure == "store":
         monkeypatch.setattr(thumbnails, "write_thumbnail", lambda *args: False)
     for _ in range(2):
         with pytest.raises(HTTPException) as pending:
@@ -5675,16 +5615,23 @@ def test_jxl_gallery_queues_one_thumbnail_and_never_redirects(monkeypatch, tmp_p
     assert len(jobs) == 1
     jobs[0]()
 
-    if write_fails:
+    if failure == "decode":
         with pytest.raises(HTTPException) as failed:
             library._get_thumbnail_sync(item_hash)
         assert failed.value.status_code == 404
         assert len(jobs) == 1
-    else:
-        response = library._get_thumbnail_sync(item_hash)
-        assert response.media_type == "image/png"
-        assert response.body.startswith(b"\x89PNG")
-        assert not vaults.audit_vault_health("default")["missing_files"]["thumb"]
+        return
+    if failure == "store":
+        monkeypatch.setattr(thumbnails, "write_thumbnail", real_write)
+        with pytest.raises(HTTPException) as retry:
+            library._get_thumbnail_sync(item_hash)
+        assert retry.value.status_code == 503
+        assert len(jobs) == 2
+        jobs[1]()
+    response = library._get_thumbnail_sync(item_hash)
+    assert response.media_type == "image/png"
+    assert response.body.startswith(b"\x89PNG")
+    assert not vaults.audit_vault_health("default")["missing_files"]["thumb"]
 
 
 def test_failed_rebuild_preserves_previous_thumbnail(monkeypatch, tmp_path):

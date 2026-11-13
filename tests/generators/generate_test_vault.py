@@ -20,6 +20,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from config_schema import WorkspaceConfig
+from thumbnail_store import write_thumbnail
 
 
 DEFAULT_ROOT = ROOT / "tests" / "generated"
@@ -362,13 +363,13 @@ def generate_vault(args: argparse.Namespace) -> Path:
     assets_dir = vault_root / "vault" / "assets"
     notes_dir = vault_root / "vault" / "notes"
     topics_dir = data_dir / "topics"
-    thumbs_dir = vault_root / "ui_cache" / "thumbnails"
+    thumb_db = vault_root / "ui_cache" / "thumbs.db"
     logs_dir = vault_root / "logs"
     for directory in [
         vault_root / "db",
         assets_dir,
         notes_dir,
-        thumbs_dir,
+        thumb_db.parent,
         topics_dir,
         vault_root / "review",
         logs_dir / "raw",
@@ -440,16 +441,17 @@ def generate_vault(args: argparse.Namespace) -> Path:
         shard = _shard(item_hash)
         asset_path = assets_dir / shard / original_filename
         note_path = notes_dir / shard / f"{storage_id}.md"
-        thumb_path = thumbs_dir / shard / f"{storage_id}{'_video' if is_video else ''}.jpg"
         wd_path = vault_root / "wd-tags" / shard / f"{storage_id}.json"
         asset_path.parent.mkdir(parents=True, exist_ok=True)
         note_path.parent.mkdir(parents=True, exist_ok=True)
-        thumb_path.parent.mkdir(parents=True, exist_ok=True)
         asset_path.write_bytes(asset_bytes)
         linked_topics = [_topic_link(note_path, topics_dir, label) for label in topic_labels]
         note_path.write_text(_frontmatter(row, linked_topics, wd_tags), encoding="utf-8")
         _write_wd_cache(wd_path, item_hash, storage_id, mime_type, wd_tags, args)
-        thumb_path.write_bytes(_svg_bytes(f"thumb-{storage_id}", 320, 240))
+        source = asset_path.stat()
+        if not write_thumbnail(thumb_db, storage_id, source.st_mtime_ns, source.st_size,
+                               _svg_bytes(f"thumb-{storage_id}", 320, 240), "image/svg+xml"):
+            raise OSError(f"Could not store test thumbnail {storage_id}")
 
         items.append({
             "hash": item_hash,

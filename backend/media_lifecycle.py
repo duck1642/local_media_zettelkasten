@@ -38,7 +38,6 @@ def discover_owned_paths(storage_id: str, ctx: WorkspaceContext | None = None) -
         (vault.assets_dir, lambda name: name.startswith(f"{value}.") and len(name) > len(value) + 1),
         (vault.notes_dir, lambda name: name == f"{value}.md"),
         (vault.wd_tags_dir, lambda name: name == f"{value}.json"),
-        (vault.thumbnails_dir, lambda name: name in {f"{value}.jpg", f"{value}_video.jpg"}),
     )
     paths: list[Path] = []
     for base_dir, owns_name in specs:

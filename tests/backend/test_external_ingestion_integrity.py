@@ -83,8 +83,6 @@ def rollback_runtime(monkeypatch, tmp_path):
         utils.storage_asset_path_for(item_hash, storage_id, ".jpg", "image/jpeg", ctx=ctx),
         utils.note_path_for(item_hash, storage_id=storage_id, ctx=ctx),
         utils.wd_tag_cache_path_for(item_hash, storage_id=storage_id, ctx=ctx),
-        module.thumbnail_path_for(item_hash, storage_id, ctx=ctx),
-        module.video_thumbnail_path_for(item_hash, storage_id, ctx=ctx),
     ]
     for path in paths:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -906,6 +906,44 @@ test('gallery replaces a pending thumbnail without loading the original', async 
   expect(originalRequests).toBe(0);
 });
 
+test('Inspector and filmstrip replace pending thumbnails', async ({ page }) => {
+  await installMockVaultApi(page, { testJxlThumbnail: true });
+  const solo = manifest.items.find((entry) => entry.artist === 'Mock Solo')!;
+  const video = manifest.items.find((entry) => entry.artist === 'Mock Group C')!;
+  let pending = 0;
+  async function serveThumbnail(route: Route) {
+    const headers = { 'Cache-Control': 'no-store', 'Retry-After': '0' };
+    if (pending > 0) {
+      pending -= 1;
+      return route.fulfill({ status: 503, headers });
+    }
+    return route.fulfill({
+      headers,
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>'
+    });
+  }
+  await page.route(`**/api/thumbnails/${solo.hash}`, serveThumbnail);
+  await page.route(`**${video.thumbnail_url}`, serveThumbnail);
+  await page.goto('/?lmz_test_page_size=100');
+
+  const soloTile = page.getByTestId('vault-tile').filter({ hasText: 'Mock Solo' });
+  await expect.poll(() => soloTile.getByRole('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(2);
+  pending = 2;
+  await soloTile.click();
+  const preview = page.locator('aside.inspector').getByAltText('Preview');
+  await expect(preview).toHaveAttribute('src', /^blob:/);
+  await expect.poll(() => preview.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(2);
+
+  await page.getByText('Mock Group B').click();
+  await page.getByTitle('Wide View', { exact: true }).click();
+  pending = 2;
+  await page.getByRole('button', { name: 'Toggle filmstrip', exact: true }).click();
+  const filmstripImage = page.locator('.filmstrip-thumb[title="2 / 2"] img');
+  await expect(filmstripImage).toHaveAttribute('src', /^blob:/);
+  await expect.poll(() => filmstripImage.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(2);
+});
+
 test('artist edit refreshes tile while source URL and platform stay read-only', async ({ page }) => {
   await openMockVault(page);
 

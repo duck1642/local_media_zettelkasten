@@ -75,7 +75,7 @@ def test_generated_vault_smoke_and_isolation(tmp_path, monkeypatch):
         "db",
         "review",
         "wd-tags",
-        "ui_cache/thumbnails",
+        "ui_cache",
         "logs",
         "queues",
         "batches",
@@ -117,8 +117,7 @@ def test_generated_vault_smoke_and_isolation(tmp_path, monkeypatch):
 
     assert utils.DB_PATH == db_path
     assert utils.LOGS_DIR == vault_root / "logs"
-    assert utils.THUMBNAILS_DIR == vault_root / "ui_cache" / "thumbnails"
-    assert thumbnails.THUMBNAIL_DIR == utils.THUMBNAILS_DIR
+    assert thumbnails.thumbnail_db_path() == vault_root / "ui_cache" / "thumbs.db"
     conn = sqlite_operator.connect_database()
     try:
         assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 100
@@ -170,12 +169,11 @@ def test_generated_vault_rows_notes_and_media_are_consistent(tmp_path, monkeypat
             asset_path = vault_root / "vault" / "assets" / shard / f"{item['storage_id']}{item['extension']}"
             note_path = vault_root / "vault" / "notes" / shard / f"{item['storage_id']}.md"
             wd_path = vault_root / "wd-tags" / shard / f"{item['storage_id']}.json"
-            suffix = "_video" if item["mime_type"].startswith("video/") else ""
-            thumb_path = vault_root / "ui_cache" / "thumbnails" / shard / f"{item['storage_id']}{suffix}.jpg"
             assert asset_path.exists()
             assert note_path.exists()
             assert wd_path.exists()
-            assert thumb_path.exists()
+            with sqlite3.connect(vault_root / "ui_cache" / "thumbs.db") as cache:
+                assert cache.execute("SELECT mime_type FROM thumbnails WHERE storage_id = ?", (item["storage_id"],)).fetchone() == ("image/svg+xml",)
             assert hashlib.sha256(asset_path.read_bytes()).hexdigest() == item["hash"]
 
             frontmatter = yaml.safe_load(note_path.read_text(encoding="utf-8").split("---", 2)[1])

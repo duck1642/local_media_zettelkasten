@@ -50,7 +50,6 @@ _DYNAMIC_CONSTANTS = {
     "BATCHES_DIR": lambda: get_runtime_context().active_vault.batches_dir,
     "MODELS_DIR": lambda: get_runtime_context().models_dir,
     "WD_TAGS_DIR": lambda: get_runtime_context().active_vault.wd_tags_dir,
-    "THUMBNAILS_DIR": lambda: get_runtime_context().active_vault.thumbnails_dir,
     "TOPICS_DIR": lambda: get_runtime_context().topics_dir,
 
     "OUTPUT_DIR": lambda: get_runtime_context().active_vault.vault_dir,
@@ -132,7 +131,6 @@ def setup_directories(ctx: WorkspaceContext | None = None):
         vault.batches_dir,
         runtime.models_dir,
         vault.wd_tags_dir,
-        vault.thumbnails_dir,
         runtime.topics_dir,
         vault.vault_dir,
         vault.assets_dir,

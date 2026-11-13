@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import type { VaultItem } from './types';
   import { apiUrl } from './api';
+  import { retryThumbnail } from './retryThumbnail';
   import { isImageMedia, isVideoMedia } from './media';
   import { IconChevronLeft, IconChevronRight, IconExpand, IconWide } from './icons';
 
@@ -30,7 +31,8 @@
 <div class="inspector-header">
   <div class="group-container media-preview">
       {#if isImageMedia(item)}
-          <img src={apiUrl(item.thumbnail_url || item.url)} alt="Preview" />
+          <img src={apiUrl(item.thumbnail_url || item.url)}
+               use:retryThumbnail={item.thumbnail_url ? apiUrl(item.thumbnail_url) : ''} alt="Preview" />
       {:else if isVideoMedia(item)}
           <!-- svelte-ignore a11y-media-has-caption -->
           <video

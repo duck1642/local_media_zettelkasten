@@ -11,7 +11,7 @@ VAULT_LOCAL_DIRS = (
     "logs/structured",
     "review",
     "wd-tags",
-    "ui_cache/thumbnails",
+    "ui_cache",
     "queues",
     "batches",
     "input",

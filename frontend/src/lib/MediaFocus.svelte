@@ -3,6 +3,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { log as uiLog } from './logger';
   import { apiUrl } from './api';
+  import { retryThumbnail } from './retryThumbnail';
   import { isImageMedia, isVideoMedia } from './media';
   import {
     IconChevronLeft,
@@ -510,7 +511,8 @@
               title={`${index + 1} / ${group.items.length}`}
               on:click={() => changeTo(entry)}
             >
-              <img src={thumbnailUrl(entry)} alt="" draggable="false" />
+              <img src={thumbnailUrl(entry)} use:retryThumbnail={entry.thumbnail_url ? thumbnailUrl(entry) : ''}
+                   alt="" draggable="false" />
               <div class="thumb-index-badge">{index + 1}</div>
             </button>
           {/each}

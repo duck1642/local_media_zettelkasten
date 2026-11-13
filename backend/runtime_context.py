@@ -38,7 +38,6 @@ class VaultContext:
     batches_dir: Path
     input_dir: Path
     wd_tags_dir: Path
-    thumbnails_dir: Path
     logs_dir: Path
 
 
@@ -118,7 +117,6 @@ def build_vault_context(vault_id: str, name: str, vault_root: Path) -> VaultCont
         batches_dir=vault_root / "batches",
         input_dir=vault_root / "input",
         wd_tags_dir=vault_root / "wd-tags",
-        thumbnails_dir=vault_root / "ui_cache" / "thumbnails",
         logs_dir=vault_root / "logs",
     )
 

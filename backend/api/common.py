@@ -24,7 +24,6 @@ from review_cache import (
     upsert_review_cache_entry,
 )
 from runtime_context import WorkspaceContext, get_runtime_context
-from thumbnails import thumbnail_path_for, video_thumbnail_path_for
 from utils import (
     asset_path_for,
     atomic_write_text,
@@ -490,8 +489,6 @@ def _item_file_paths(item_hash: str, extension: str, mime_type: str, storage_id:
         note_path_for(item_hash, storage_id=storage_id, ctx=ctx),
         wd_tag_cache_path_for(item_hash, storage_id=storage_id, ctx=ctx),
     ]
-    paths.append(thumbnail_path_for(item_hash, storage_id, ctx=ctx))
-    paths.append(video_thumbnail_path_for(item_hash, storage_id, ctx=ctx))
     paths.extend(discover_owned_paths(storage_id, ctx=ctx))
     return list(dict.fromkeys(paths))
 

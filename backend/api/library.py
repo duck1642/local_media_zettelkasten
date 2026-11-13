@@ -588,28 +588,21 @@ def _serve_thumbnail(item_hash: str, *, cache_only: bool = False):
         row = cursor.fetchone()
         if not row: raise HTTPException(status_code=404)
         ext, mime, storage_id, thumb_status = row
-        if cache_only:
+        is_jxl = mime == "image/jxl" or str(ext or "").lower() == ".jxl"
+        if cache_only or is_jxl:
             try:
                 thumbnail = ensure_thumbnail(item_hash, ext, mime, wait=False, storage_id=storage_id,
-                                             ctx=ctx, cache_only=True, persist_legacy=False)
-            except (FileNotFoundError, ThumbnailBusyError):
-                thumbnail = None
-            if thumbnail is not None:
-                data, content_type = thumbnail
-                return Response(data, media_type=content_type, headers={"Cache-Control": "private, max-age=60"})
-            raise HTTPException(status_code=503, detail="Thumbnail generation paused during backup",
-                                headers={"Retry-After": "1", "Cache-Control": "no-store"})
-        if mime == "image/jxl" or str(ext or "").lower() == ".jxl":
-            try:
-                thumbnail = ensure_thumbnail(item_hash, ext, mime, wait=False,
-                                             storage_id=storage_id, ctx=ctx, cache_only=True)
-            except ThumbnailBusyError:
-                thumbnail = None
+                                             ctx=ctx, cache_only=True)
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=404) from exc
+            except ThumbnailBusyError:
+                thumbnail = None
             if thumbnail is not None:
                 data, content_type = thumbnail
                 return Response(data, media_type=content_type, headers={"Cache-Control": "private, max-age=60"})
+            if cache_only:
+                raise HTTPException(status_code=503, detail="Thumbnail generation paused during backup",
+                                    headers={"Retry-After": "1", "Cache-Control": "no-store"})
             if thumb_status == "failed":
                 raise HTTPException(status_code=404, detail="Thumbnail generation failed",
                                     headers={"Cache-Control": "no-store"})

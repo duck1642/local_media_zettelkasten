@@ -13,7 +13,7 @@ from logger import log_system
 from media_lifecycle import storage_lifecycle_lock
 from runtime_context import WorkspaceContext, get_runtime_context
 from thumbnail_store import read_thumbnail, write_thumbnail
-from utils import asset_path_for, get_app_settings, require_storage_id, storage_shard_for_hash
+from utils import asset_path_for, get_app_settings, require_storage_id
 
 TARGET_WIDTH = 600
 MAX_HEIGHT = 800
@@ -30,28 +30,8 @@ class ThumbnailBusyError(RuntimeError):
     pass
 
 
-def _thumbnail_dir(ctx: WorkspaceContext | None = None) -> Path:
-    return (ctx or get_runtime_context()).active_vault.thumbnails_dir
-
-
-class _ThumbnailDirProxy:
-    def __fspath__(self):
-        return str(_thumbnail_dir())
-
-    def __str__(self):
-        return str(_thumbnail_dir())
-
-    def __eq__(self, other):
-        return _thumbnail_dir() == Path(other)
-
-    def __truediv__(self, other):
-        return _thumbnail_dir() / other
-
-    def __getattr__(self, name):
-        return getattr(_thumbnail_dir(), name)
-
-
-THUMBNAIL_DIR = _ThumbnailDirProxy()
+class ThumbnailStoreError(OSError):
+    """Encoding succeeded, but the cache could not save the thumbnail."""
 
 
 def thumbnail_db_path(ctx: WorkspaceContext | None = None) -> Path:
@@ -60,26 +40,6 @@ def thumbnail_db_path(ctx: WorkspaceContext | None = None) -> Path:
 
 def thumbnail_db_path_for_vault(root: Path) -> Path:
     return root / "ui_cache" / "thumbs.db"
-
-
-def thumbnail_path_for(item_hash: str, storage_id: str, ctx: WorkspaceContext | None = None) -> Path:
-    storage_id = require_storage_id(storage_id)
-    return _thumbnail_dir(ctx) / storage_shard_for_hash(item_hash) / f"{storage_id}.jpg"
-
-
-def video_thumbnail_path_for(item_hash: str, storage_id: str, ctx: WorkspaceContext | None = None) -> Path:
-    storage_id = require_storage_id(storage_id)
-    return _thumbnail_dir(ctx) / storage_shard_for_hash(item_hash) / f"{storage_id}_video.jpg"
-
-
-def _expected_thumbnail_path(item_hash: str, mime_type: str | None, storage_id: str, ctx: WorkspaceContext | None = None) -> Path:
-    if (mime_type or "").startswith("video/"):
-        return video_thumbnail_path_for(item_hash, storage_id, ctx)
-    return thumbnail_path_for(item_hash, storage_id, ctx)
-
-
-def _thumbnail_is_fresh(thumb_path: Path, asset_path: Path) -> bool:
-    return thumb_path.exists() and thumb_path.stat().st_mtime >= asset_path.stat().st_mtime
 
 
 def _configured_format() -> str:
@@ -128,8 +88,8 @@ def generate_video_thumbnail(asset_path: Path, output_format: str = "jpeg") -> b
             return _encode_thumbnail(image, output_format)
 
 
-def ensure_thumbnail(item_hash: str, extension: str | None, mime_type: str | None, wait: bool = True, storage_id: str | None = None, ctx: WorkspaceContext | None = None, *, rebuild: bool = False, cache_only: bool = False, require_store: bool = False, persist_legacy: bool = True) -> tuple[bytes, str] | None:
-    """Return a cached or newly generated thumbnail without relying on legacy files.
+def ensure_thumbnail(item_hash: str, extension: str | None, mime_type: str | None, wait: bool = True, storage_id: str | None = None, ctx: WorkspaceContext | None = None, *, rebuild: bool = False, cache_only: bool = False, require_store: bool = False) -> tuple[bytes, str] | None:
+    """Read a thumbnail from SQLite or generate it from the original media.
 
     Medya kilidi silme işlemiyle çakışmayı önler, semafor üretim sayısını
     sınırlar. wait=False iken gerekli izin alınamazsa ThumbnailBusyError yükselir.
@@ -143,6 +103,8 @@ def ensure_thumbnail(item_hash: str, extension: str | None, mime_type: str | Non
         cached = read_thumbnail(db_path, storage_id, source_stat.st_mtime_ns, source_stat.st_size)
         if cached is not None:
             return cached
+    if cache_only:
+        return None
     lifecycle_lock = storage_lifecycle_lock(storage_id, ctx=ctx)
     lifecycle_acquired = lifecycle_lock.acquire(blocking=wait)
     if not lifecycle_acquired:
@@ -154,18 +116,6 @@ def ensure_thumbnail(item_hash: str, extension: str | None, mime_type: str | Non
             cached = read_thumbnail(db_path, *key)
             if cached is not None:
                 return cached
-            # Migration copies the exact old JPEG and leaves it in place.
-            legacy = _expected_thumbnail_path(item_hash, mime_type, storage_id, ctx)
-            try:
-                if legacy.stat().st_mtime_ns >= source_stat.st_mtime_ns:
-                    data = legacy.read_bytes()
-                    if data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9"):
-                        if not persist_legacy or write_thumbnail(db_path, *key, data, "image/jpeg") or not require_store:
-                            return data, "image/jpeg"
-            except OSError:
-                pass
-        if cache_only:
-            return None
         generation_acquired = _GENERATION_SEMAPHORE.acquire(blocking=wait)
         if not generation_acquired:
             raise ThumbnailBusyError("thumbnail generation is busy")
@@ -174,11 +124,11 @@ def ensure_thumbnail(item_hash: str, extension: str | None, mime_type: str | Non
             generate = generate_video_thumbnail if (mime_type or "").startswith("video/") else generate_image_thumbnail
             result = generate(asset_path, output_format), f"image/{output_format}"
             if not write_thumbnail(db_path, *key, *result) and (rebuild or require_store):
-                raise OSError("Could not update thumbnail cache")
+                raise ThumbnailStoreError("Could not update thumbnail cache")
             return result
         finally:
             _GENERATION_SEMAPHORE.release()
-    except ThumbnailBusyError:
+    except (ThumbnailBusyError, ThumbnailStoreError):
         raise
     except Exception as e:
         log_system("ERROR", "Thumbnail generation failed", hash=item_hash, error=str(e), exc_info=True)
@@ -221,6 +171,9 @@ def queue_thumbnail(item_hash: str, extension: str | None, mime_type: str | None
                         # A later request can only read the worker's output from disk.
                         ensure_thumbnail(item_hash, extension, mime_type, storage_id=storage_id,
                                          ctx=ctx, require_store=True)
+                    except ThumbnailStoreError:
+                        # The next request can retry; the source image decoded successfully.
+                        return
                     except Exception:
                         status, error = "failed", "Thumbnail generation failed"
                     else:
@@ -278,18 +231,13 @@ def repair_missing_thumbnails(conn, limit: int = 100, ctx: WorkspaceContext | No
                 cached = read_thumbnail(
                     thumbnail_db_path(ctx), storage_id, source_stat.st_mtime_ns, source_stat.st_size
                 )
-                thumb_path = _expected_thumbnail_path(item_hash, mime_type, storage_id, ctx)
-                if cached is not None or _thumbnail_is_fresh(thumb_path, asset_path):
+                if cached is not None:
                     skipped += 1
                     continue
             try:
-                if rebuild:
-                    thumb_result = ensure_thumbnail(item_hash, extension, mime_type, storage_id=storage_id,
-                                                    ctx=ctx, rebuild=True)
-                elif ctx is None:
-                    thumb_result = ensure_thumbnail(item_hash, extension, mime_type, wait=True, storage_id=storage_id)
-                else:
-                    thumb_result = ensure_thumbnail(item_hash, extension, mime_type, wait=True, storage_id=storage_id, ctx=ctx)
+                # Repair succeeds only if the result is available to later requests.
+                thumb_result = ensure_thumbnail(item_hash, extension, mime_type, storage_id=storage_id,
+                                                ctx=ctx, rebuild=rebuild, require_store=True)
                 if thumb_result:
                     conn.execute(
                         "UPDATE items SET thumbnail_status = 'ready', thumbnail_error = NULL WHERE hash = ?",
@@ -303,7 +251,7 @@ def repair_missing_thumbnails(conn, limit: int = 100, ctx: WorkspaceContext | No
                     )
                     failed += 1
             except Exception as exc:
-                if not rebuild:
+                if not rebuild and not isinstance(exc, ThumbnailStoreError):
                     conn.execute(
                         "UPDATE items SET thumbnail_status = 'failed', thumbnail_error = ? WHERE hash = ?",
                         (str(exc), item_hash)

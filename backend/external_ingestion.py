@@ -25,7 +25,7 @@ from metadata_index import (
 )
 from queue_service import QueueEntry, parse_queue, queue_path
 from thumbnail_store import delete_thumbnail
-from thumbnails import thumbnail_db_path, thumbnail_path_for, video_thumbnail_path_for
+from thumbnails import thumbnail_db_path
 from downloaders.gallery_dl_wrapper import download_gallery, inspect_gallery
 from downloaders.yt_dlp_wrapper import download_video, inspect_youtube_community
 import random
@@ -579,8 +579,6 @@ class ExternalIngestor:
                     paths.extend((
                         note_path_for(file_hash, storage_id=storage_id, ctx=self.ctx),
                         wd_tag_cache_path_for(file_hash, storage_id=storage_id, ctx=self.ctx),
-                        thumbnail_path_for(file_hash, storage_id, ctx=self.ctx),
-                        video_thumbnail_path_for(file_hash, storage_id, ctx=self.ctx),
                     ))
                 cleanup_paths.append((storage_id, paths))
 
