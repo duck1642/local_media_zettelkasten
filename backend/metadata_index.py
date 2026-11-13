@@ -17,6 +17,7 @@ from runtime_context import WorkspaceContext, get_runtime_context
 from utils import note_path_for, wd_tag_cache_path_for, utc_now_str
 from artists import backfill_artists_from_items
 from platforms import backfill_platforms_from_items
+from vault_packages import BackupBusyError, vault_write_window
 
 
 READY_KEY = "initial_backfill_complete"
@@ -332,9 +333,9 @@ def _now() -> str:
     return utc_now_str()
 
 
-def _to_relative(path: Path) -> str:
+def _to_relative(path: Path, ctx: WorkspaceContext | None = None) -> str:
     try:
-        active_vault = get_runtime_context().active_vault
+        active_vault = _ctx(ctx).active_vault
         if active_vault and active_vault.root:
             root_path = Path(active_vault.root).resolve()
             resolved_path = path.resolve()
@@ -345,8 +346,8 @@ def _to_relative(path: Path) -> str:
     return str(path).replace("\\", "/")
 
 
-def _file_sig(path: Path) -> tuple[str, int | None, int | None]:
-    rel_path = _to_relative(path)
+def _file_sig(path: Path, ctx: WorkspaceContext | None = None) -> tuple[str, int | None, int | None]:
+    rel_path = _to_relative(path, ctx)
     try:
         stat = path.stat()
         return rel_path, int(stat.st_mtime_ns), int(stat.st_size)
@@ -354,11 +355,11 @@ def _file_sig(path: Path) -> tuple[str, int | None, int | None]:
         return rel_path, None, None
 
 
-def _current_sigs(item_hash: str, storage_id: str) -> dict:
-    note_path = note_path_for(item_hash, storage_id)
-    wd_path = wd_tag_cache_path_for(item_hash, storage_id)
-    note_path_str, note_mtime, note_size = _file_sig(note_path)
-    wd_path_str, wd_mtime, wd_size = _file_sig(wd_path)
+def _current_sigs(item_hash: str, storage_id: str, ctx: WorkspaceContext | None = None) -> dict:
+    note_path = note_path_for(item_hash, storage_id, ctx)
+    wd_path = wd_tag_cache_path_for(item_hash, storage_id, ctx)
+    note_path_str, note_mtime, note_size = _file_sig(note_path, ctx)
+    wd_path_str, wd_mtime, wd_size = _file_sig(wd_path, ctx)
     return {
         "note_path": note_path_str,
         "note_mtime_ns": note_mtime,
@@ -445,8 +446,8 @@ def _parse_simple_frontmatter(yaml_text: str) -> dict | None:
     return data
 
 
-def _load_frontmatter(item_hash: str, storage_id: str, stages: dict[str, float] | None = None) -> tuple[dict, str]:
-    path = note_path_for(item_hash, storage_id)
+def _load_frontmatter(item_hash: str, storage_id: str, stages: dict[str, float] | None = None, ctx: WorkspaceContext | None = None) -> tuple[dict, str]:
+    path = note_path_for(item_hash, storage_id, ctx)
     stage_started = time.perf_counter()
     if not path.exists():
         _add_stage(stages, "frontmatter_read", stage_started)
@@ -499,8 +500,8 @@ def _tag_name(tag) -> str:
     return ""
 
 
-def _cache_wd_payload(item_hash: str, storage_id: str) -> dict:
-    cache_data = load_tag_cache(item_hash, storage_id)
+def _cache_wd_payload(item_hash: str, storage_id: str, ctx: WorkspaceContext | None = None) -> dict:
+    cache_data = load_tag_cache(item_hash, storage_id, ctx)
     if cache_data.get("status") != "ok":
         return {"status": "missing"}
     return {
@@ -513,9 +514,9 @@ def _cache_wd_payload(item_hash: str, storage_id: str) -> dict:
     }
 
 
-def _wd_payload(item_hash: str, storage_id: str, frontmatter: dict) -> dict:
+def _wd_payload(item_hash: str, storage_id: str, frontmatter: dict, ctx: WorkspaceContext | None = None) -> dict:
     has_wd_fields = any(field in frontmatter for field in WD_FRONTMATTER_FIELDS)
-    cache_payload = _cache_wd_payload(item_hash, storage_id)
+    cache_payload = _cache_wd_payload(item_hash, storage_id, ctx)
     if not has_wd_fields:
         return cache_payload
 
@@ -958,7 +959,7 @@ def safe_reindex_item_metadata(
         return {"item_hash": item_hash, "status": "error", "error": str(exc)}
 
 
-def _row_stale(row) -> bool:
+def _row_stale(row, ctx: WorkspaceContext | None = None) -> bool:
     item_hash = row[0]
     storage_id = row[1]
     indexed_hash = row[2]
@@ -969,7 +970,7 @@ def _row_stale(row) -> bool:
         return True
     if indexed_storage_id != storage_id:
         return True
-    sigs = _current_sigs(item_hash, storage_id)
+    sigs = _current_sigs(item_hash, storage_id, ctx)
     sig_changed = (
         row[4] != sigs["note_path"]
         or row[5] != sigs["note_mtime_ns"]
@@ -1011,8 +1012,9 @@ def stale_metadata_hashes(conn: sqlite3.Connection, limit: int | None = None) ->
     return stale
 
 
-def stale_metadata_count(conn: sqlite3.Connection) -> int:
-    ensure_metadata_schema(conn)
+def stale_metadata_count(conn: sqlite3.Connection, *, ctx: WorkspaceContext | None = None, ensure_schema: bool = True) -> int:
+    if ensure_schema:
+        ensure_metadata_schema(conn)
     cursor = conn.execute("""
         SELECT
             items.hash,
@@ -1030,7 +1032,7 @@ def stale_metadata_count(conn: sqlite3.Connection) -> int:
         LEFT JOIN item_metadata_files ON item_metadata_files.item_hash = items.hash
         ORDER BY items.date_added DESC
     """)
-    return sum(1 for row in cursor if _row_stale(row))
+    return sum(1 for row in cursor if _row_stale(row, ctx))
 
 
 def reindex_stale_metadata_batch(conn: sqlite3.Connection, limit: int = REPAIR_BATCH_SIZE, allow_scan: bool = False) -> dict:
@@ -1171,19 +1173,20 @@ def _add_stage(stages: dict[str, float] | None, key: str, started: float):
         stages[key] += (time.perf_counter() - started) * 1000
 
 
-def _metadata_payload(conn: sqlite3.Connection, item_hash: str, storage_id: str, stages: dict[str, float] | None = None) -> dict:
-    _remember_watchdog_storage(item_hash, storage_id)
+def _metadata_payload(item_hash: str, storage_id: str, stages: dict[str, float] | None = None, ctx: WorkspaceContext | None = None) -> dict:
+    if ctx is None:
+        _remember_watchdog_storage(item_hash, storage_id)
     stage_started = time.perf_counter()
-    sigs = _current_sigs(item_hash, storage_id)
+    sigs = _current_sigs(item_hash, storage_id, ctx)
     _add_stage(stages, "metadata_sigs", stage_started)
     stage_started = time.perf_counter()
-    frontmatter, error = _load_frontmatter(item_hash, storage_id, stages=stages)
+    frontmatter, error = _load_frontmatter(item_hash, storage_id, stages=stages, ctx=ctx)
     _add_stage(stages, "frontmatter_load_parse", stage_started)
     stage_started = time.perf_counter()
-    topics = parse_topic_values(frontmatter.get("topics"), note_path_for(item_hash, storage_id)) if not error else []
+    topics = parse_topic_values(frontmatter.get("topics"), note_path_for(item_hash, storage_id, ctx), ctx) if not error else []
     _add_stage(stages, "topic_normalize", stage_started)
     stage_started = time.perf_counter()
-    wd_payload = _wd_payload(item_hash, storage_id, frontmatter) if not error else {"status": "missing"}
+    wd_payload = _wd_payload(item_hash, storage_id, frontmatter, ctx) if not error else {"status": "missing"}
     _add_stage(stages, "wd_payload", stage_started)
     stage_started = time.perf_counter()
     wd_rows = _wd_rows(wd_payload)
@@ -1220,6 +1223,8 @@ def rebuild_all_metadata(
     batch_size: int = FULL_REBUILD_BATCH_SIZE,
     context: str = "full",
     progress_callback=None,
+    *,
+    target_ctx: WorkspaceContext | None = None,
 ) -> dict:
     """Kasanın not ve etiket indeksini baştan kur; isteğe bağlı ilerleme bildir.
 
@@ -1314,16 +1319,18 @@ def rebuild_all_metadata(
                     """,
                     wd_rows,
                 )
-                try:
-                    from workspace_db import connect_workspace_database, upsert_wd_dictionary_tags
-                    workspace_conn = connect_workspace_database()
+                # Henüz kaydedilmemiş bir kasanın indeksini kurarken aktif workspace'i değiştirme.
+                if target_ctx is None:
                     try:
-                        upsert_wd_dictionary_tags(workspace_conn, [(row[3], row[1]) for row in wd_rows])
-                        workspace_conn.commit()
-                    finally:
-                        workspace_conn.close()
-                except Exception:
-                    pass
+                        from workspace_db import connect_workspace_database, upsert_wd_dictionary_tags
+                        workspace_conn = connect_workspace_database()
+                        try:
+                            upsert_wd_dictionary_tags(workspace_conn, [(row[3], row[1]) for row in wd_rows])
+                            workspace_conn.commit()
+                        finally:
+                            workspace_conn.close()
+                    except Exception:
+                        pass
                 stages["wd_tag_inserts"] += (time.perf_counter() - sub_started) * 1000
                 wd_rows.clear()
             stages["db_flushes"] += (time.perf_counter() - flush_started) * 1000
@@ -1336,7 +1343,7 @@ def rebuild_all_metadata(
                 log_system("WARNING", "Metadata full rebuild skipped item missing storage_id", hash=item_hash, context=context)
                 continue
             stage_started = time.perf_counter()
-            payload = _metadata_payload(conn, item_hash, storage_id, stages=stages)
+            payload = _metadata_payload(item_hash, storage_id, stages=stages, ctx=target_ctx)
             stages["metadata_read_parse"] += (time.perf_counter() - stage_started) * 1000
             stage_started = time.perf_counter()
             seen_topics: set[str] = set()
@@ -1404,6 +1411,18 @@ def rebuild_all_metadata(
 
 
 def _repair_worker(full: bool = False, maintenance: bool = False, ctx: WorkspaceContext | None = None):
+    try:
+        with vault_write_window():
+            _run_repair_worker(full, maintenance, ctx)
+    except BackupBusyError:
+        state = _runtime_state(ctx)
+        if maintenance:
+            _finish_maintenance_rebuild_job("error", "Vault backup is running. Try again when it finishes.", ctx=ctx)
+        with state.repair_lock:
+            state.repair_running = False
+
+
+def _run_repair_worker(full: bool, maintenance: bool, ctx: WorkspaceContext | None):
     runtime = _ctx(ctx)
     state = _runtime_state(runtime)
     try:
@@ -1515,15 +1534,18 @@ def _watchdog_flush():
     try:
         from db.sqlite_operator import init_database
 
-        conn = init_database(ctx=runtime)
-        try:
-            for item_hash in hashes:
-                safe_reindex_item_metadata(conn, item_hash, "watchdog")
-            conn.commit()
-            success = True
-            log_system("INFO", "Metadata watchdog reindexed changes", count=len(hashes))
-        finally:
-            conn.close()
+        with vault_write_window():
+            conn = init_database(ctx=runtime)
+            try:
+                for item_hash in hashes:
+                    safe_reindex_item_metadata(conn, item_hash, "watchdog")
+                conn.commit()
+                success = True
+                log_system("INFO", "Metadata watchdog reindexed changes", count=len(hashes))
+            finally:
+                conn.close()
+    except BackupBusyError:
+        pass  # Keep the pending hashes; the existing timer retries after backup.
     except Exception as exc:
         log_system("WARNING", "Metadata watchdog reindex failed", error=str(exc))
     finally:
@@ -1755,8 +1777,12 @@ def indexed_item_metadata(conn: sqlite3.Connection, item_hash: str) -> dict:
     if row is None:
         return {"topics": [], "wd_data": {"status": "missing"}}
     if _row_stale(row):
-        safe_reindex_item_metadata(conn, item_hash, "detail_refresh")
-        conn.commit()
+        try:
+            with vault_write_window():
+                safe_reindex_item_metadata(conn, item_hash, "detail_refresh")
+                conn.commit()
+        except BackupBusyError:
+            pass  # Serve the existing metadata without a read-triggered write.
     topics = [
         row[0]
         for row in conn.execute("SELECT topic FROM item_topics WHERE item_hash = ? ORDER BY topic", (item_hash,)).fetchall()

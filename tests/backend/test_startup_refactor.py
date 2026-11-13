@@ -597,7 +597,7 @@ def test_vault_relocation_activates_runtime_and_vault_logs(monkeypatch, tmp_path
     assert response.json()["status"] == "relocate_vault"
 
     vault_root = ws_root / "data" / "vaults" / "default"
-    vault_root.mkdir(parents=True)
+    importlib.import_module("vaults").create_vault_layout(vault_root)
     relocate = client.post(
         "/api/vaults/relocate",
         json={"vault_id": "default", "new_vault_root": str(vault_root)},

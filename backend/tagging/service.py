@@ -217,9 +217,9 @@ def _write_result(
         return True
 
 
-def load_tag_cache(item_hash: str, storage_id: str) -> dict:
+def load_tag_cache(item_hash: str, storage_id: str, ctx: WorkspaceContext | None = None) -> dict:
     """Önbelleği ortak biçimde oku; eksik veya bozuk önbellek için boş sözlük ver."""
-    return _read_tag_cache(wd_tag_cache_path_for(item_hash, storage_id))
+    return _read_tag_cache(wd_tag_cache_path_for(item_hash, storage_id, ctx))
 
 
 def _read_tag_cache(path: Path) -> dict:

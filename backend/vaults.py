@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -39,6 +39,7 @@ from vault_packages import (
     snapshot_sqlite_database,
     utc_package_timestamp,
     validate_archive_members,
+    vault_backup_window,
 )
 
 EXPORT_IMPORT_ROOTS = {"db", "vault", "review"}
@@ -437,6 +438,45 @@ def _rename_import_stage(stage_root: Path, final_root: Path) -> None:
     stage_root.rename(final_root)
 
 
+def _rebuild_new_vault_metadata(conn: sqlite3.Connection, runtime: WorkspaceContext, vault_id: str, name: str, root: Path) -> None:
+    from metadata_index import rebuild_all_metadata
+
+    target = replace(runtime, active_vault=build_vault_context(vault_id, name, root))
+    rebuild_all_metadata(conn, context="new_vault", target_ctx=target)
+    conn.commit()
+
+
+def _install_vault_package(source: Path, members: list[zipfile.ZipInfo], stage_root: Path, final_root: Path,
+                           config: dict, clean_id: str, entry: dict, runtime: WorkspaceContext) -> None:
+    promoted = False
+    try:
+        with zipfile.ZipFile(source, "r") as archive:
+            # Eski yedekler açılabilir; üretilmiş thumbnail'ler yeniden oluşturulur.
+            extract_members(archive, stage_root, (member for member in members if not member.filename.startswith("ui_cache/")))
+        create_vault_layout(stage_root, initialize_db=False)
+        final_root.parent.mkdir(parents=True, exist_ok=True)
+        _rename_import_stage(stage_root, final_root)
+        promoted = True
+        # Göreli konu bağlantılarını geçici dizinden değil, kasanın son konumundan çöz.
+        conn = init_database(vault_db_path(final_root))
+        try:
+            conn.execute("""
+                UPDATE items SET thumbnail_status = 'pending', thumbnail_error = NULL
+                WHERE mime_type LIKE 'image/%' OR mime_type LIKE 'video/%'
+            """)
+            _rebuild_new_vault_metadata(conn, runtime, clean_id, entry["name"], final_root)
+        finally:
+            conn.close()
+        config["vaults"][clean_id] = entry
+        _write_config(config, runtime)
+    except Exception:
+        if promoted:
+            shutil.rmtree(final_root, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(stage_root.parent, ignore_errors=True)
+
+
 def delete_vault(vault_id: str, confirm: bool = False, ctx: WorkspaceContext | None = None) -> dict:
     """Aktif olmayan kasayı kaldır; dolu kasa için açık onay iste.
 
@@ -627,100 +667,76 @@ def _copy_item_tiles(source_conn: sqlite3.Connection, target_conn: sqlite3.Conne
 
 
 def merge_vaults_to_new(name: str, source_ids: list[str], ctx: WorkspaceContext | None = None) -> dict:
-    import re
-    preview = preview_merged_vault(name, source_ids, ctx)
+    runtime = _ctx(ctx)
+    with _vault_transition():
+        return _merge_vaults_to_new(name, source_ids, runtime)
+
+
+def _merge_vaults_to_new(name: str, source_ids: list[str], runtime: WorkspaceContext) -> dict:
+    preview = preview_merged_vault(name, source_ids, runtime)
     clean_id = str(preview["vault"])
-    config = _ensure_vault_registry(_read_config(ctx))
+    config = _ensure_vault_registry(_read_config(runtime))
     vaults = config["vaults"]
-    created = False
-    target_conn: sqlite3.Connection | None = None
+    entry = {"name": str(preview["name"]), "root": f"data/vaults/{clean_id}"}
+    target_root = vault_root(entry, runtime)
+    target_root.mkdir(parents=True, exist_ok=False)
     try:
-        create_vault(str(preview["name"]), clean_id, ctx)
-        created = True
-        target_root = vault_root(_ensure_vault_registry(_read_config(ctx))["vaults"][clean_id], ctx)
-        target_db = vault_db_path(target_root)
-        target_conn = init_database(target_db)
-        target_columns = _item_columns(target_conn)
-        copied_paths: list[Path] = []
-        imported = 0
-        skipped = 0
-        seen_hashes: set[str] = set()
-
-        def safe_copy(src: Path, dst: Path) -> bool:
-            if _copy_if_exists(src, dst):
-                copied_paths.append(dst)
-                return True
-            return False
-
-        for source_id in preview["source_vault_ids"]:
-            source_root = vault_root(vaults[source_id], ctx)
-            source_db = vault_db_path(source_root)
-            source_conn = sqlite3.connect(source_db)
-            try:
-                source_columns = _item_columns(source_conn)
-                copy_columns = [column for column in target_columns if column in source_columns]
-                if "hash" not in copy_columns or "storage_id" not in copy_columns:
-                    raise ValueError(f"source item schema is unsupported: {source_id}")
-                select_sql = f"SELECT {', '.join(copy_columns)} FROM items"
-                insert_sql = (
-                    f"INSERT INTO items({', '.join(copy_columns)}) "
-                    f"VALUES ({', '.join('?' for _ in copy_columns)})"
-                )
-                for row in source_conn.execute(select_sql).fetchall():
-                    item = dict(zip(copy_columns, row))
-                    item_hash = item.get("hash")
-                    if not item_hash:
-                        skipped += 1
-                        continue
-                    if item_hash in seen_hashes:
-                        skipped += 1
-                        continue
-                    seen_hashes.add(item_hash)
-                    old_storage_id = str(item.get("storage_id") or "")
-                    new_storage_id = allocate_storage_id(target_conn)
-                    item["storage_id"] = new_storage_id
-                    target_conn.execute(insert_sql, [item.get(column) for column in copy_columns])
-                    _copy_item_tiles(source_conn, target_conn, str(item_hash))
-
-                    if old_storage_id:
-                        ext = str(item.get("file_extension") or "")
-                        mime_type = str(item.get("mime_type") or "")
-                        old_paths = _item_paths(source_root, str(item_hash), old_storage_id, ext, mime_type)
-                        new_paths = _item_paths(target_root, str(item_hash), new_storage_id, ext, mime_type)
-                        safe_copy(old_paths["asset"], new_paths["asset"])
-                        safe_copy(old_paths["wd"], new_paths["wd"])
-                        safe_copy(old_paths["thumb"], new_paths["thumb"])
-                        if safe_copy(old_paths["note"], new_paths["note"]):
-                            text = new_paths["note"].read_text(encoding="utf-8", errors="ignore")
-                            pattern = re.compile(r"\b" + re.escape(old_storage_id) + r"\b")
-                            text = pattern.sub(new_storage_id, text)
-                            new_paths["note"].write_text(text, encoding="utf-8")
-                    imported += 1
-            finally:
-                source_conn.close()
-        target_conn.commit()
-        preview.update({
-            "status": "success",
-            "imported": imported,
-            "skipped": skipped,
-            "items": vault_list(ctx),
-        })
-        return preview
+        create_vault_layout(target_root, initialize_db=False)
+        with closing(init_database(vault_db_path(target_root))) as target_conn:
+            imported, skipped = _copy_merge_items(target_conn, target_root, preview["source_vault_ids"], vaults, runtime)
+            _rebuild_new_vault_metadata(target_conn, runtime, clean_id, entry["name"], target_root)
+        # Kopyalar ve indeks hazır olana kadar kasayı listede yayınlama.
+        vaults[clean_id] = entry
+        _write_config(config, runtime)
     except Exception:
-        if target_conn is not None:
-            target_conn.rollback()
-            target_conn.close()
-            target_conn = None
-        if created:
-            try:
-                delete_vault(clean_id, confirm=True, ctx=ctx)
-            except Exception:
-                root = _config_root(ctx) / "data" / "vaults" / clean_id
-                shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(target_root, ignore_errors=True)
         raise
-    finally:
-        if target_conn is not None:
-            target_conn.close()
+    return {**preview, "status": "success", "imported": imported, "skipped": skipped, "items": vault_list(runtime)}
+
+
+def _copy_merge_items(target_conn: sqlite3.Connection, target_root: Path, source_ids: list[str],
+                      vaults: dict, runtime: WorkspaceContext) -> tuple[int, int]:
+    import re
+
+    target_columns = _item_columns(target_conn)
+    imported = skipped = 0
+    seen_hashes: set[str] = set()
+    for source_id in source_ids:
+        source_root = vault_root(vaults[source_id], runtime)
+        with closing(sqlite3.connect(vault_db_path(source_root))) as source_conn:
+            source_columns = _item_columns(source_conn)
+            copy_columns = [column for column in target_columns if column in source_columns]
+            if "hash" not in copy_columns or "storage_id" not in copy_columns:
+                raise ValueError(f"source item schema is unsupported: {source_id}")
+            insert_sql = f"INSERT INTO items({', '.join(copy_columns)}) VALUES ({', '.join('?' for _ in copy_columns)})"
+            for row in source_conn.execute(f"SELECT {', '.join(copy_columns)} FROM items"):
+                item = dict(zip(copy_columns, row))
+                item_hash = item.get("hash")
+                if not item_hash or item_hash in seen_hashes:
+                    skipped += 1
+                    continue
+                old_storage_id = str(item.get("storage_id") or "")
+                if not old_storage_id:
+                    raise ValueError(f"source item has no storage ID: {source_id}/{item_hash}")
+                new_storage_id = allocate_storage_id(target_conn)
+                ext = str(item.get("file_extension") or "")
+                mime_type = str(item.get("mime_type") or "")
+                old_paths = _item_paths(source_root, item_hash, old_storage_id, ext, mime_type)
+                new_paths = _item_paths(target_root, item_hash, new_storage_id, ext, mime_type)
+                if not _copy_if_exists(old_paths["asset"], new_paths["asset"]):
+                    raise ValueError(f"source asset is missing: {old_paths['asset']}")
+                _copy_if_exists(old_paths["wd"], new_paths["wd"])
+                if _copy_if_exists(old_paths["note"], new_paths["note"]):
+                    note = new_paths["note"].read_text(encoding="utf-8", errors="ignore")
+                    pattern = re.compile(r"\b" + re.escape(old_storage_id) + r"\b")
+                    new_paths["note"].write_text(pattern.sub(new_storage_id, note), encoding="utf-8")
+                # Thumbnail cache'i yeni storage ID ile gerektiğinde yeniden üretilecek.
+                item.update(storage_id=new_storage_id, thumbnail_status="pending", thumbnail_error=None)
+                target_conn.execute(insert_sql, [item.get(column) for column in copy_columns])
+                _copy_item_tiles(source_conn, target_conn, item_hash)
+                seen_hashes.add(item_hash)
+                imported += 1
+    return imported, skipped
 
 
 def _fetch_vault_items(db_path: Path) -> list[dict]:
@@ -773,10 +789,18 @@ def _fetch_vault_items(db_path: Path) -> list[dict]:
 
 
 def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> dict:
-    clean_id, _entry, root = _vault_entry(vault_id, ctx)
+    from metadata_index import stale_metadata_count
+
+    clean_id, entry, root = _vault_entry(vault_id, ctx)
+    target_ctx = replace(_ctx(ctx), active_vault=build_vault_context(clean_id, str(entry.get("name") or clean_id), root))
     db_path = vault_db_path(root)
     items = _fetch_vault_items(db_path)
+    from thumbnail_store import list_thumbnail_fingerprints
+    from thumbnails import thumbnail_db_path_for_vault
+
+    cached_thumbnail_fingerprints = list_thumbnail_fingerprints(thumbnail_db_path_for_vault(root))
     expected = {"asset": set(), "note": set(), "wd": set(), "thumb": set()}
+    cached_thumb_paths = set()
     failed_thumbs = []
     
     for item in items:
@@ -786,19 +810,29 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
         mime = str(item.get("mime_type") or "").lower()
         if mime.startswith("image/") or mime.startswith("video/"):
             expected["wd"].add(paths["wd"].resolve())
-            if item.get("thumbnail_status") == "failed":
+            thumb_path = paths["thumb"].resolve()
+            fingerprint = cached_thumbnail_fingerprints.get(str(item["storage_id"]))
+            if fingerprint is not None:
+                try:
+                    source_stat = paths["asset"].stat()
+                except OSError:
+                    pass
+                else:
+                    if fingerprint == (source_stat.st_mtime_ns, source_stat.st_size):
+                        cached_thumb_paths.add(thumb_path)
+            if item.get("thumbnail_status") == "failed" and thumb_path not in cached_thumb_paths:
                 failed_thumbs.append({
                     "hash": item["hash"],
                     "path": str(paths["thumb"]),
                     "error": item.get("thumbnail_error") or "Unknown thumbnail generation failure"
                 })
             else:
-                expected["thumb"].add(paths["thumb"].resolve())
+                expected["thumb"].add(thumb_path)
 
     missing = {key: [] for key in expected}
     for key, paths in expected.items():
         for path in sorted(paths):
-            if not path.exists():
+            if not path.exists() and not (key == "thumb" and path in cached_thumb_paths):
                 missing[key].append(str(path))
 
     def existing_files(folder: Path, suffix: str | None = None) -> set[Path]:
@@ -817,8 +851,10 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
     orphan_notes = sorted(str(path) for path in actual_notes - expected["note"])
     orphan_wd = sorted(str(path) for path in actual_wd - expected["wd"])
     orphan_thumbs = sorted(str(path) for path in actual_thumbs - expected["thumb"])
+    thumbnail_ids = {str(item["storage_id"]) for item in items}
+    orphan_thumbnail_rows = sorted(cached_thumbnail_fingerprints.keys() - thumbnail_ids)
 
-    stale_index_rows = {"topics": 0, "wd_tags": 0, "metadata_files": 0}
+    stale_index_rows = {"topics": 0, "wd_tags": 0, "metadata_files": 0, "unindexed_or_changed_items": 0}
     bad_storage_ids = []
     hash_mismatches = []
     facet_drift = []
@@ -841,6 +877,7 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
             stale_index_rows["metadata_files"] = conn.execute(
                 "SELECT COUNT(*) FROM item_metadata_files m LEFT JOIN items i ON i.hash = m.item_hash WHERE i.hash IS NULL"
             ).fetchone()[0]
+            stale_index_rows["unindexed_or_changed_items"] = stale_metadata_count(conn, ctx=target_ctx, ensure_schema=False)
             for kind, table, column, count_sql in (
                 ("topic", "item_topics", "topic_norm", "COUNT(*)"),
                 ("wd_tag", "item_wd_tags", "tag_norm", "COUNT(DISTINCT item_hash)"),
@@ -900,6 +937,7 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
     issue_count = (
         sum(len(paths) for paths in missing.values())
         + len(orphan_assets) + len(orphan_notes) + len(orphan_wd) + len(orphan_thumbs)
+        + len(orphan_thumbnail_rows)
         + sum(stale_index_rows.values())
         + len(bad_storage_ids) + len(hash_mismatches)
         + len(facet_drift) + len(broken_topic_links)
@@ -928,6 +966,7 @@ def audit_vault_health(vault_id: str, ctx: WorkspaceContext | None = None) -> di
             "notes": orphan_notes,
             "wd_cache": orphan_wd,
             "thumbnails": orphan_thumbs,
+            "thumbnail_db_rows": orphan_thumbnail_rows,
         },
         "stale_index_rows": stale_index_rows,
         "bad_storage_ids": bad_storage_ids,
@@ -952,7 +991,7 @@ def _health_category_counts(report: dict) -> dict:
         "missing_wd_cache": len(missing.get("wd") or []),
         "missing_thumbnails": len(missing.get("thumb") or []),
         "orphan_assets_notes": len(orphans.get("assets") or []) + len(orphans.get("notes") or []),
-        "orphan_derived_cache": len(orphans.get("wd_cache") or []) + len(orphans.get("thumbnails") or []),
+        "orphan_derived_cache": sum(len(orphans.get(key) or []) for key in ("wd_cache", "thumbnails", "thumbnail_db_rows")),
         "stale_index_rows": sum(int(value or 0) for value in stale.values()),
         "facet_drift": len(report.get("facet_drift") or []),
         "bad_storage_ids": len(report.get("bad_storage_ids") or []),
@@ -1086,7 +1125,7 @@ def repair_vault(vault_id: str, actions: list[str] | None = None, confirm_destru
     selected = {str(action or "").strip() for action in (actions or []) if str(action or "").strip()}
     if not selected:
         selected = {"metadata", "thumbnails", "wd_tagging", "derived_cache", "review_sidecars", "quarantine_orphans"}
-    allowed = {"metadata", "thumbnails", "wd_tagging", "derived_cache", "review_sidecars", "quarantine_orphans"}
+    allowed = {"metadata", "thumbnails", "rebuild_thumbnails", "wd_tagging", "derived_cache", "review_sidecars", "quarantine_orphans"}
     unknown = sorted(selected - allowed)
     if unknown:
         raise ValueError(f"unknown repair actions: {', '.join(unknown)}")
@@ -1130,11 +1169,13 @@ def repair_vault(vault_id: str, actions: list[str] | None = None, confirm_destru
         finally:
             conn.close()
 
-    if "thumbnails" in selected and db_path.exists():
+    if selected.intersection({"thumbnails", "rebuild_thumbnails"}) and db_path.exists():
         from thumbnails import repair_missing_thumbnails
         conn = init_database(db_path)
         try:
-            result["thumbnails"] = repair_missing_thumbnails(conn, limit=100000, ctx=repair_ctx)
+            result["thumbnails"] = repair_missing_thumbnails(
+                conn, limit=100000, ctx=repair_ctx, rebuild="rebuild_thumbnails" in selected,
+            )
         finally:
             conn.close()
 
@@ -1146,6 +1187,9 @@ def repair_vault(vault_id: str, actions: list[str] | None = None, confirm_destru
             conn.close()
 
     if "derived_cache" in selected:
+        from thumbnail_store import delete_thumbnail
+        from thumbnails import thumbnail_db_path_for_vault
+
         removed = 0
         for key in ("wd_cache", "thumbnails"):
             for path_text in before["orphans"].get(key, []):
@@ -1153,6 +1197,14 @@ def repair_vault(vault_id: str, actions: list[str] | None = None, confirm_destru
                 if path.exists():
                     path.unlink()
                     removed += 1
+        if db_path.is_file() and before["orphans"]["thumbnail_db_rows"]:
+            thumb_db = thumbnail_db_path_for_vault(root)
+            with closing(sqlite3.connect(db_path)) as conn:
+                for storage_id in before["orphans"]["thumbnail_db_rows"]:
+                    with storage_lifecycle_lock(storage_id, ctx=repair_ctx):
+                        # Sağlık raporundan sonra aynı ID ile kayıt oluşturulmuş olabilir.
+                        if conn.execute("SELECT 1 FROM items WHERE storage_id = ?", (storage_id,)).fetchone() is None:
+                            removed += int(delete_thumbnail(thumb_db, storage_id))
         result["derived_cache"] = {"removed": removed}
 
     if "review_sidecars" in selected:
@@ -1219,9 +1271,17 @@ def backup_vault(vault_id: str, ctx: WorkspaceContext | None = None, confirm: bo
     """Kasanın dosyalarını ve SQLite anlık kopyasını geri yüklenebilir ZIP'e yaz."""
     if not confirm:
         raise ValueError("backup requires confirmation")
-    runtime = _ctx(ctx)
+    with vault_backup_window():
+        return _write_vault_backup(vault_id, _ctx(ctx))
+
+
+def _write_vault_backup(vault_id: str, runtime: WorkspaceContext) -> dict:
     _package_preflight(runtime)
     clean_id, entry, root = _vault_entry(vault_id, runtime)
+    # An inactive target can still have pending work after an earlier switch.
+    target = replace(runtime, active_vault=build_vault_context(clean_id, str(entry.get("name") or clean_id), root))
+    if target.active_vault.root != runtime.active_vault.root:
+        _package_preflight(target)
     if not root.exists():
         raise ValueError(f"vault root does not exist: {root}")
     if not vault_root_is_usable(root, runtime.root):
@@ -1236,13 +1296,30 @@ def backup_vault(vault_id: str, ctx: WorkspaceContext | None = None, confirm: bo
         snapshot_dir = Path(tempfile.mkdtemp(prefix="lmz-backup-db-"))
         snapshot_db = snapshot_dir / "lmz_main.db"
         try:
-            # WAL/SHM dosyalarını arşivleme; SQLite kopyası geçerli DB durumunu içerir.
-            db_sidecars = {db_path.resolve(), Path(f"{db_path}-wal").resolve(), Path(f"{db_path}-shm").resolve()}
-            payload_files = [path for path in _packaged_files(root, root.rglob("*")) if path.resolve() not in db_sidecars]
+            # Canlı SQLite dosyaları yerine işlem açısından tutarlı kopyaları arşivle.
+            # Ürettiğimiz yedek, restore okuyucusunun kabul ettiği yollarla sınırlı olmalı.
+            payload_roots = BACKUP_RESTORE_ROOTS - {"db", "ui_cache", "logs"}
+            payload_files = [path for name in sorted(payload_roots) for path in _files_under(root, name)]
+            # Diagnostic logs can rotate during reads. Stage them separately so
+            # that rotation neither interrupts the backup nor skews its manifest.
+            log_files = []
+            for path in _files_under(root, "logs"):
+                relative = path.relative_to(root)
+                staged = snapshot_dir / relative
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copyfile(path, staged)
+                except FileNotFoundError:
+                    continue
+                log_files.append((staged, relative.as_posix()))
             include_db = db_path.exists()
             if include_db:
                 snapshot_sqlite_database(db_path, snapshot_db)
-            file_count = len(payload_files) + (1 if include_db else 0)
+                with closing(sqlite3.connect(snapshot_db)) as conn:
+                    item_count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+            else:
+                item_count = 0
+            file_count = len(payload_files) + len(log_files) + int(include_db)
             manifest = build_manifest(
                 package_type=BACKUP_PACKAGE_TYPE,
                 source_vault_id=clean_id,
@@ -1253,13 +1330,13 @@ def backup_vault(vault_id: str, ctx: WorkspaceContext | None = None, confirm: bo
                     "notes": True,
                     "review": True,
                     "wd_cache": True,
-                    "thumbnails": True,
+                    "thumbnails": False,
                     "queues": True,
                     "batches": True,
                     "ingest_folders": True,
                     "logs": True,
                 },
-                item_count=_vault_item_count(root),
+                item_count=item_count,
                 file_count=file_count,
             )
             with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -1268,6 +1345,8 @@ def backup_vault(vault_id: str, ctx: WorkspaceContext | None = None, confirm: bo
                     archive.write(snapshot_db, "db/lmz_main.db")
                 for path in payload_files:
                     archive.write(path, path.relative_to(root).as_posix())
+                for path, relative in log_files:
+                    archive.write(path, relative)
         except VaultPackageError:
             if package_path.exists():
                 package_path.unlink()
@@ -1499,8 +1578,8 @@ def import_vault_package(
     if not str(package_fingerprint_value or "").strip():
         raise ValueError("import requires package_fingerprint from preview")
     runtime = _ctx(ctx)
-    _package_preflight(runtime)
-    with package_operation_lock(f"{runtime.config_path}:import"):
+    with package_operation_lock(f"{runtime.config_path}:install"), runtime_transitions.runtime_transition_lock():
+        _package_preflight(runtime)
         source, fingerprint, manifest, members = _read_export_package(package_path)
         if fingerprint != str(package_fingerprint_value).strip():
             raise ValueError("package fingerprint does not match preview")
@@ -1519,20 +1598,7 @@ def import_vault_package(
 
         stage_parent = runtime.root / ".tmp" / "imports" / operation_id()
         stage_root = stage_parent / "vault"
-        try:
-            with zipfile.ZipFile(source, "r") as archive:
-                extract_members(archive, stage_root, members)
-            create_vault_layout(stage_root)
-            final_root.parent.mkdir(parents=True, exist_ok=True)
-            _rename_import_stage(stage_root, final_root)
-            config["vaults"][clean_id] = entry
-            _write_config(config, runtime)
-        except Exception:
-            if final_root.exists():
-                shutil.rmtree(final_root, ignore_errors=True)
-            raise
-        finally:
-            shutil.rmtree(stage_parent, ignore_errors=True)
+        _install_vault_package(source, members, stage_root, final_root, config, clean_id, entry, runtime)
     return {
         "status": "success",
         "vault": clean_id,
@@ -1553,8 +1619,8 @@ def restore_backup_package(
     if not str(package_fingerprint_value or "").strip():
         raise ValueError("restore requires package_fingerprint from preview")
     runtime = _ctx(ctx)
-    _package_preflight(runtime)
-    with package_operation_lock(f"{runtime.config_path}:restore"):
+    with package_operation_lock(f"{runtime.config_path}:install"), runtime_transitions.runtime_transition_lock():
+        _package_preflight(runtime)
         source, fingerprint, manifest, members = _read_backup_package(package_path)
         if fingerprint != str(package_fingerprint_value).strip():
             raise ValueError("package fingerprint does not match preview")
@@ -1571,20 +1637,7 @@ def restore_backup_package(
         stage_parent = runtime.root / ".tmp" / "restores" / operation_id()
         stage_root = stage_parent / "vault"
         config = _ensure_vault_registry(_read_config(runtime))
-        try:
-            with zipfile.ZipFile(source, "r") as archive:
-                extract_members(archive, stage_root, members)
-            create_vault_layout(stage_root)
-            final_root.parent.mkdir(parents=True, exist_ok=True)
-            _rename_import_stage(stage_root, final_root)
-            config["vaults"][clean_id] = entry
-            _write_config(config, runtime)
-        except Exception:
-            if final_root.exists():
-                shutil.rmtree(final_root, ignore_errors=True)
-            raise
-        finally:
-            shutil.rmtree(stage_parent, ignore_errors=True)
+        _install_vault_package(source, members, stage_root, final_root, config, clean_id, entry, runtime)
     return {
         "status": "success",
         "vault": clean_id,

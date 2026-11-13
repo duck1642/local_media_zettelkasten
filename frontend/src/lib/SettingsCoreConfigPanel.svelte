@@ -113,6 +113,16 @@
       </label>
     </div>
 
+    <label for="settings-thumbnail-format">
+      Thumbnail format
+      <div class="micro-desc">Applies to new thumbnails. Use Rebuild thumbnails in Maintenance to update existing ones.</div>
+    </label>
+    <select id="settings-thumbnail-format" value={$appSettings.ingestion.processing.thumbnail_format} on:change={(event) => setConfig((draft) => draft.ingestion.processing.thumbnail_format = textValue(event) as 'jpeg' | 'webp' | 'png')}>
+      <option value="jpeg">JPEG</option>
+      <option value="webp">WebP</option>
+      <option value="png">PNG</option>
+    </select>
+
     <SettingsTaggingPanel />
   </div>
 </div>

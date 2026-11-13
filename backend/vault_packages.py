@@ -20,10 +20,46 @@ VALID_PACKAGE_TYPES = {BACKUP_PACKAGE_TYPE, EXPORT_PACKAGE_TYPE}
 
 _PACKAGE_LOCKS: dict[str, threading.Lock] = {}
 _PACKAGE_LOCKS_GUARD = threading.Lock()
+_BACKUP_STATE_LOCK = threading.Lock()
+_backup_running = False
+_active_writes = 0
 
 
 class VaultPackageError(ValueError):
     pass
+
+
+class BackupBusyError(VaultPackageError):
+    pass
+
+
+@contextlib.contextmanager
+def vault_write_window():
+    """Register a write without holding a thread lock while the work runs."""
+    global _active_writes
+    with _BACKUP_STATE_LOCK:
+        if _backup_running:
+            raise BackupBusyError("Vault backup is running. Try again when it finishes.")
+        _active_writes += 1
+    try:
+        yield
+    finally:
+        with _BACKUP_STATE_LOCK:
+            _active_writes -= 1
+
+
+@contextlib.contextmanager
+def vault_backup_window():
+    global _backup_running
+    with _BACKUP_STATE_LOCK:
+        if _backup_running or _active_writes:
+            raise BackupBusyError("Cannot start backup while another backup or write is running. Try again shortly.")
+        _backup_running = True
+    try:
+        yield
+    finally:
+        with _BACKUP_STATE_LOCK:
+            _backup_running = False
 
 
 def utc_package_timestamp() -> str:

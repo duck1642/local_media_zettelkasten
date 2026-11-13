@@ -24,7 +24,8 @@ from metadata_index import (
     refresh_metadata_index_counters,
 )
 from queue_service import QueueEntry, parse_queue, queue_path
-from thumbnails import thumbnail_path_for, video_thumbnail_path_for
+from thumbnail_store import delete_thumbnail
+from thumbnails import thumbnail_db_path, thumbnail_path_for, video_thumbnail_path_for
 from downloaders.gallery_dl_wrapper import download_gallery, inspect_gallery
 from downloaders.yt_dlp_wrapper import download_video, inspect_youtube_community
 import random
@@ -606,6 +607,8 @@ class ExternalIngestor:
         for storage_id, paths in cleanup_paths:
             # Wait for any thumbnail already being published before unlinking.
             with storage_lifecycle_lock(storage_id, ctx=self.ctx):
+                if storage_id:
+                    delete_thumbnail(thumbnail_db_path(self.ctx), storage_id)
                 for path in paths:
                     try:
                         path.unlink(missing_ok=True)

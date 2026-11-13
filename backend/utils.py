@@ -75,6 +75,7 @@ EXT_MAP = {
     "image/png": ".png",
     "image/gif": ".gif",
     "image/webp": ".webp",
+    "image/jxl": ".jxl",
     "image/jfif": ".jpg",
     "video/mp4": ".mp4",
     "video/webm": ".webm",

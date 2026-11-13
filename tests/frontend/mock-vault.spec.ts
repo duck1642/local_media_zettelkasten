@@ -110,6 +110,7 @@ async function installMockVaultApi(
     onLocalIngestStart?: (payload?: any) => Promise<void> | void;
     onMaintenanceAction?: (action: 'auth' | 'metadata' | 'review') => Promise<void> | void;
     onItemsRequest?: (url: URL) => Promise<void> | void;
+    testJxlThumbnail?: boolean;
     onItemPatch?: (payload: any) => Promise<void> | void;
     metadataRebuildResponse?: unknown;
     metadataStatusSequence?: unknown[];
@@ -125,6 +126,9 @@ async function installMockVaultApi(
   } = {}
 ) {
   let items = cloneItems();
+  if (options.testJxlThumbnail) {
+    items[0] = { ...items[0], mime_type: 'image/jxl', extension: '.jxl', thumbnail_url: `/api/thumbnails/${items[0].hash}` };
+  }
   let failNextArtistMerge = false;
   let artistDetails = facetItems(items, 'artist').map((entry, index) => ({
     id: index + 1,
@@ -395,6 +399,9 @@ async function installMockVaultApi(
         });
       }
       if (action === 'repair') {
+        if (payload.actions?.includes('rebuild_thumbnails')) {
+          return fulfillJson(route, { status: 'success', thumbnails: { checked: 3, generated: 2, skipped: 0, failed: 1 } });
+        }
         return fulfillJson(route, { status: 'success', after: { issue_count: 0, missing_files: {}, orphans: {}, facet_drift: [] } });
       }
       const extension = action === 'backup' ? 'lmzbackup.zip' : 'lmzvault.zip';
@@ -870,6 +877,33 @@ test('mock vault fixture is isolated and renders grouped media paths', async ({ 
   await page.getByText('Mock Group B').click();
   await page.locator('aside.inspector .group-nav button').last().click();
   await expect(page.locator('aside.inspector video')).toHaveAttribute('src', /mock-vault\/video/);
+});
+
+test('gallery replaces a pending thumbnail without loading the original', async ({ page }) => {
+  await installMockVaultApi(page, { testJxlThumbnail: true });
+  const item = manifest.items.find((entry) => entry.artist === 'Mock Solo')!;
+  let requests = 0;
+  let originalRequests = 0;
+  await page.route(`**${item.url}`, async (route) => {
+    originalRequests += 1;
+    await route.fallback();
+  });
+  await page.route(`**/api/thumbnails/${item.hash}`, async (route) => {
+    requests += 1;
+    if (requests < 3) {
+      return route.fulfill({ status: 503, headers: { 'Retry-After': '0', 'Cache-Control': 'no-store' } });
+    }
+    return route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>'
+    });
+  });
+  await page.goto('/?lmz_test_page_size=100');
+  const tile = page.getByTestId('vault-tile').filter({ hasText: 'Mock Solo' });
+  await expect(tile.getByRole('img')).toHaveAttribute('src', /^blob:/);
+  await expect.poll(() => tile.getByRole('img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(2);
+  expect(requests).toBe(3);
+  expect(originalRequests).toBe(0);
 });
 
 test('artist edit refreshes tile while source URL and platform stay read-only', async ({ page }) => {
@@ -1349,7 +1383,7 @@ test('launcher reports legacy workspace configs as an explicit adoption case', a
   await expect(page.getByText(/explicit content adoption/)).toBeVisible();
 });
 
-test('general settings persist webview controls and gate the context menu', async ({ page }) => {
+test('general settings persist thumbnail format and webview controls', async ({ page }) => {
   await openMockVault(page);
   const contextMenuAllowedBefore = await page.evaluate(() =>
     window.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
@@ -1365,6 +1399,8 @@ test('general settings persist webview controls and gate the context menu', asyn
   expect(navigationAllowed).toBe(false);
 
   await page.getByRole('button', { name: /Settings/ }).click();
+  await expect(page.getByLabel('Thumbnail format')).toHaveValue('jpeg');
+  await page.getByLabel('Thumbnail format').selectOption('webp');
   await page.getByLabel('Enable developer tools').check();
   await page.getByLabel('Enable right-click context menu').check();
 
@@ -1387,6 +1423,8 @@ test('general settings persist webview controls and gate the context menu', asyn
     window.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
   );
   expect(contextMenuAllowedAfterReload).toBe(true);
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await expect(page.getByLabel('Thumbnail format')).toHaveValue('webp');
 });
 
 test('missing app-settings ETag keeps the draft dirty and shows an actionable error', async ({ page }) => {
@@ -1598,6 +1636,18 @@ test('settings previews vault merge and runs vault health package actions', asyn
     { action: 'import-preview', payload: { package_path: 'C:/Exports/default.lmzvault.zip', target_name: 'Imported' } },
     { action: 'import', payload: { package_path: 'C:/Exports/default.lmzvault.zip', target_name: 'Imported', package_fingerprint: 'fingerprint-imported', confirm: true } }
   ]);
+});
+
+test('vault health rebuilds only thumbnails after confirmation', async ({ page }) => {
+  const actions: Array<{ action: string; payload?: any }> = [];
+  await openMockVault(page, { onVaultAction: (action, payload) => actions.push({ action, payload }) });
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: 'Maintenance' }).click();
+  await page.getByRole('button', { name: 'Rebuild thumbnails', exact: true }).click();
+  expect(actions).toEqual([]);
+  await page.getByRole('dialog', { name: 'Rebuild Thumbnails' }).getByRole('button', { name: /Rebuild/ }).click();
+  await expect(page.getByText('Thumbnail rebuild: 2 generated, 0 skipped, 1 failed (3 checked).')).toBeVisible();
+  expect(actions).toEqual([{ action: 'repair', payload: { actions: ['rebuild_thumbnails'], confirm_destructive: false } }]);
 });
 
 test('settings metadata rebuild shows progress only for maintenance job', async ({ page }) => {

@@ -2,7 +2,8 @@
 
 import asyncio
 import os
-from contextlib import asynccontextmanager
+import re
+from contextlib import asynccontextmanager, nullcontext
 
 from app_paths import get_app_paths
 from config_repository import bootstrap_data_home
@@ -20,6 +21,7 @@ from metadata_index import stop_metadata_watchdog
 from runtime_activation import activate_runtime_context
 from runtime_context import RuntimeNotLoadedError, build_runtime_context, has_runtime_context
 from runtime_transitions import RuntimeSwitchBlockedError
+from vault_packages import BackupBusyError, vault_write_window
 
 from api import app_settings, capture, ingestion, library, logs, review, runtime
 from api.common import (
@@ -132,7 +134,7 @@ app.add_middleware(
     allow_origins=sorted(ALLOWED_ORIGINS),
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["ETag"],
+    expose_headers=["ETag", "Retry-After"],
 )
 
 
@@ -156,8 +158,14 @@ async def local_api_guard(request: Request, call_next):
             return JSONResponse(status_code=status_code, content={"detail": detail})
     if request.method != "OPTIONS" and not has_runtime_context() and not _is_pre_runtime_path(request.url.path):
         return JSONResponse(status_code=503, content={"detail": "Workspace not loaded"})
+    # Backup takes the exclusive window in its worker, not a normal write slot.
+    is_backup = request.method == "POST" and re.fullmatch(r"/api/vaults/[^/]+/backup/?", request.url.path)
+    write_window = vault_write_window() if request.method in MUTATING_METHODS and not is_backup else nullcontext()
     try:
-        return await call_next(request)
+        with write_window:
+            return await call_next(request)
+    except BackupBusyError as exc:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
     except RuntimeNotLoadedError:
         return JSONResponse(status_code=503, content={"detail": "Workspace not loaded"})
 

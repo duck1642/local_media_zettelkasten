@@ -49,11 +49,13 @@ class IngestionConcurrency(StrictModel):
     platforms: dict[str, PlatformConcurrency] = Field(default_factory=dict)
 
 
+_LEGACY_MEDIA_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".mp4")
+_LEGACY_MEDIA_MIMES = ("image/jpeg", "image/png", "image/webp", "video/mp4")
+
+
 class AcceptedMedia(StrictModel):
-    extensions: list[str] = Field(default_factory=lambda: [".jpg", ".jpeg", ".png", ".webp", ".mp4"])
-    mime_types: list[str] = Field(
-        default_factory=lambda: ["image/jpeg", "image/png", "image/webp", "video/mp4"]
-    )
+    extensions: list[str] = Field(default_factory=lambda: [*_LEGACY_MEDIA_EXTENSIONS, ".jxl"])
+    mime_types: list[str] = Field(default_factory=lambda: [*_LEGACY_MEDIA_MIMES, "image/jxl"])
 
     @field_validator("extensions")
     @classmethod
@@ -64,6 +66,7 @@ class AcceptedMedia(StrictModel):
 
 
 class ProcessingSettings(StrictModel):
+    thumbnail_format: Literal["jpeg", "webp", "png"] = "jpeg"
     flatten_transparency: bool = True
     background_preset: Literal["white", "black", "custom"] = "white"
     custom_color: tuple[
@@ -77,6 +80,20 @@ class IngestionSettings(StrictModel):
     concurrency: IngestionConcurrency = Field(default_factory=IngestionConcurrency)
     accepted_media: AcceptedMedia = Field(default_factory=AcceptedMedia)
     processing: ProcessingSettings = Field(default_factory=ProcessingSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_legacy_media_defaults(cls, value):
+        if not isinstance(value, dict):
+            return value
+        processing = value.get("processing", {})
+        media = value.get("accepted_media")
+        # Only upgrade untouched pre-thumbnail-format defaults, not custom allowlists.
+        if (isinstance(processing, dict) and "thumbnail_format" not in processing
+                and media == {"extensions": list(_LEGACY_MEDIA_EXTENSIONS),
+                              "mime_types": list(_LEGACY_MEDIA_MIMES)}):
+            return {**value, "accepted_media": AcceptedMedia().model_dump()}
+        return value
 
 
 class VideoTaggingSettings(StrictModel):

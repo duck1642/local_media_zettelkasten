@@ -48,7 +48,7 @@ export type AppSettings = {
   ingestion: {
     concurrency: { global_max_workers: number; platforms: Record<string, PlatformConcurrency> };
     accepted_media: { extensions: string[]; mime_types: string[] };
-    processing: { flatten_transparency: boolean; background_preset: 'white' | 'black' | 'custom'; custom_color: [number, number, number] };
+    processing: { flatten_transparency: boolean; thumbnail_format: 'jpeg' | 'webp' | 'png'; background_preset: 'white' | 'black' | 'custom'; custom_color: [number, number, number] };
   };
   tagging: TaggingSettings;
 };
@@ -73,6 +73,7 @@ function normalize(value: AppSettings): AppSettings {
   next.ui.privacy_blur = Boolean(next.ui.privacy_blur);
   next.ui.ram_tracking_enabled = Boolean(next.ui.ram_tracking_enabled);
   next.ingestion.processing.flatten_transparency = Boolean(next.ingestion.processing.flatten_transparency);
+  next.ingestion.processing.thumbnail_format ??= 'jpeg';
   next.tagging.enabled = next.tagging.enabled !== false;
   next.tagging.backend ??= 'wd';
   next.tagging.model_path ??= '';

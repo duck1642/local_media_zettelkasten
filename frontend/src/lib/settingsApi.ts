@@ -97,6 +97,17 @@ export async function repairVaultHealthApi(id: string, confirmDestructive = fals
   }));
 }
 
+export async function rebuildVaultThumbnailsApi(id: string) {
+  return readJson(await apiFetch(`/api/vaults/${encodeURIComponent(id)}/repair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      actions: ['rebuild_thumbnails'],
+      confirm_destructive: false
+    })
+  }));
+}
+
 export async function packageVault(id: string, kind: 'backup' | 'export', options: { includeReview?: boolean } = {}) {
   return readJson(await apiFetch(`/api/vaults/${encodeURIComponent(id)}/${kind}`, {
     method: 'POST',

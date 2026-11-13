@@ -299,6 +299,7 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
 
 
     mime_type = get_mime_type(filepath) or "unknown"
+    is_jxl = mime_type == "image/jxl" and filepath.suffix.lower() == ".jxl"
     if not is_allowed_mime(mime_type, allowed_mimes):
         log_system("WARNING", "Skipped: Invalid MIME type", file=filepath.name, mime=mime_type)
         return False, f"Invalid MIME: {mime_type}", None
@@ -338,6 +339,9 @@ def process_file(filepath: Path, config: dict, metadata: dict = None, delete_sou
     height = None
 
     if mime_type.startswith('image/'):
+        if is_jxl:
+            from jxl_preview import register_jxl_decoder
+            register_jxl_decoder()
         phash = calculate_phash(filepath)
         tiles = calculate_tiles(filepath)
         frames = 1

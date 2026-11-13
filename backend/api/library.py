@@ -22,7 +22,7 @@ from artists import (
 from db.search_manager import search_manager
 from db.sqlite_operator import connect_database, init_database, normalize_source_url
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from logger import log_review, log_system
 from md_generator import (
     generate_markdown,
@@ -55,9 +55,11 @@ from pydantic import BaseModel
 from runtime_context import WorkspaceContext, get_runtime_context
 from tagging import load_tag_cache, tag_media
 from tagging.metadata import extra_groups
-from thumbnails import ThumbnailBusyError, get_or_generate_thumbnail
+from thumbnail_store import delete_thumbnail
+from thumbnails import ThumbnailBusyError, ensure_thumbnail, get_or_generate_thumbnail, queue_thumbnail, thumbnail_db_path
 from topics import ensure_topic_file, slugify_topic_label
 from utils import asset_path_for, asset_url_for, atomic_write_text, get_app_settings, note_path_for
+from vault_packages import BackupBusyError, vault_write_window
 from workspace_db import connect_workspace_database, upsert_wd_dictionary_tags
 
 from api.common import _item_file_paths, _open_path_external, _review_dir, _topics_dir
@@ -570,28 +572,65 @@ async def get_thumbnail(item_hash: str):
     return await asyncio.to_thread(_get_thumbnail_sync, item_hash)
 
 def _get_thumbnail_sync(item_hash: str):
-    conn = connect_database()
+    try:
+        with vault_write_window():
+            return _serve_thumbnail(item_hash)
+    except BackupBusyError:
+        return _serve_thumbnail(item_hash, cache_only=True)
+
+
+def _serve_thumbnail(item_hash: str, *, cache_only: bool = False):
+    ctx = get_runtime_context()
+    conn = connect_database(ctx=ctx)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT file_extension, mime_type, storage_id, thumbnail_status FROM items WHERE hash = ?", (item_hash,))
         row = cursor.fetchone()
         if not row: raise HTTPException(status_code=404)
         ext, mime, storage_id, thumb_status = row
+        if cache_only:
+            try:
+                thumbnail = ensure_thumbnail(item_hash, ext, mime, wait=False, storage_id=storage_id,
+                                             ctx=ctx, cache_only=True, persist_legacy=False)
+            except (FileNotFoundError, ThumbnailBusyError):
+                thumbnail = None
+            if thumbnail is not None:
+                data, content_type = thumbnail
+                return Response(data, media_type=content_type, headers={"Cache-Control": "private, max-age=60"})
+            raise HTTPException(status_code=503, detail="Thumbnail generation paused during backup",
+                                headers={"Retry-After": "1", "Cache-Control": "no-store"})
+        if mime == "image/jxl" or str(ext or "").lower() == ".jxl":
+            try:
+                thumbnail = ensure_thumbnail(item_hash, ext, mime, wait=False,
+                                             storage_id=storage_id, ctx=ctx, cache_only=True)
+            except ThumbnailBusyError:
+                thumbnail = None
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404) from exc
+            if thumbnail is not None:
+                data, content_type = thumbnail
+                return Response(data, media_type=content_type, headers={"Cache-Control": "private, max-age=60"})
+            if thumb_status == "failed":
+                raise HTTPException(status_code=404, detail="Thumbnail generation failed",
+                                    headers={"Cache-Control": "no-store"})
+            queue_thumbnail(item_hash, ext, mime, storage_id, ctx)
+            raise HTTPException(status_code=503, detail="Thumbnail generation pending",
+                                headers={"Retry-After": "1", "Cache-Control": "no-store"})
         is_image = str(mime or "").startswith("image/")
         if thumb_status == 'failed':
             if is_image:
                 return RedirectResponse(url=asset_url_for(item_hash, ext, mime, storage_id=storage_id), status_code=302)
-            from fastapi import Response
             return Response(
                 content='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100"><rect width="100%" height="100%" fill="#333"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#666" font-family="sans-serif" font-size="12">FAILED</text></svg>',
                 media_type="image/svg+xml",
                 headers={"Cache-Control": "public, max-age=31536000, immutable"}
             )
         try:
-            thumb_path = get_or_generate_thumbnail(item_hash, ext, mime, storage_id=storage_id)
+            thumbnail = get_or_generate_thumbnail(item_hash, ext, mime, storage_id=storage_id, ctx=ctx)
         except ThumbnailBusyError:
-            raise HTTPException(status_code=503, detail="Thumbnail generation busy")
-        if not thumb_path:
+            raise HTTPException(status_code=503, detail="Thumbnail generation busy",
+                                headers={"Retry-After": "1", "Cache-Control": "no-store"})
+        if not thumbnail:
             try:
                 cursor.execute(
                     "UPDATE items SET thumbnail_status = 'failed', thumbnail_error = 'get_or_generate_thumbnail returned None' WHERE hash = ?",
@@ -602,15 +641,15 @@ def _get_thumbnail_sync(item_hash: str):
                 pass
             if is_image:
                 return RedirectResponse(url=asset_url_for(item_hash, ext, mime, storage_id=storage_id), status_code=302)
-            from fastapi import Response
             return Response(
                 content='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100"><rect width="100%" height="100%" fill="#333"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#666" font-family="sans-serif" font-size="12">FAILED</text></svg>',
                 media_type="image/svg+xml",
                 headers={"Cache-Control": "public, max-age=31536000, immutable"}
             )
-        return FileResponse(
-            thumb_path, media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=31536000, immutable"}
+        data, content_type = thumbnail
+        return Response(
+            data, media_type=content_type,
+            headers={"Cache-Control": "public, max-age=60"}
         )
     finally:
         conn.close()
@@ -1212,6 +1251,7 @@ def _delete_item_row_locked(
             log_system("WARNING", "Item delete database step failed; restored staged files", hash=item_hash, error=str(exc), cleanup_errors=cleanup_errors)
         return {"hash": item_hash, "status": "cleanup_failed", "cleanup_errors": cleanup_errors, "deleted": False}
 
+    delete_thumbnail(thumbnail_db_path(ctx), row[2])
     index_payload = {"hash": item_hash, "source_url": row[3] or ""}
     if remove_indexes:
         search_manager.remove_indexes_batch([index_payload], ctx=ctx)

@@ -66,9 +66,11 @@ export function healthKindLabel(kind: string) {
     notes: 'Note',
     wd_cache: 'WD cache',
     thumbnails: 'Thumbnail',
+    thumbnail_db_rows: 'Thumbnail DB entry',
     topics: 'Topics',
     wd_tags: 'WD tags',
-    metadata_files: 'Metadata rows'
+    metadata_files: 'Metadata rows',
+    unindexed_or_changed_items: 'Unindexed or changed items'
   };
   return labels[kind] || kind.replace(/_/g, ' ');
 }

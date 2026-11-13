@@ -2,8 +2,10 @@ import asyncio
 import copy
 import os
 import shutil
+import sqlite3
 import sys
 import uuid
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
@@ -628,12 +630,15 @@ async def backup_vault(vault_id: str, body: dict | None = None):
 
 
 def _backup_vault_sync(vault_id: str, body: dict | None = None):
+    from vault_packages import BackupBusyError
     from vaults import backup_vault
 
     try:
         return backup_vault(vault_id, confirm=(body or {}).get("confirm") is True)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except BackupBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -828,7 +833,7 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
     with runtime_transitions.runtime_transition_lock():
         _ensure_runtime_switch_allowed()
         ctx = get_runtime_context()
-        snapshot = _capture_transition_snapshot(ctx)
+        snapshot: dict | None = None
         staged_config: Path | None = None
         target_root: Path | None = None
         target_paths_before: set[Path] | None = None
@@ -842,7 +847,7 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
 
             resolved_root = Path(new_vault_root).expanduser().resolve()
             target_root = resolved_root
-            if not target_root.exists():
+            if not target_root.is_dir():
                 raise HTTPException(status_code=400, detail=f"Directory does not exist: {target_root}")
 
             try:
@@ -854,9 +859,19 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
             candidate["vaults"][clean_id]["root"] = stored_root
             WorkspaceConfig.model_validate(candidate)
             target_db = target_root / "db" / "lmz_main.db"
-            if target_db.exists():
-                target_db_backup = target_root.parent / f".lmz-relocate-db-{uuid.uuid4().hex}.bak"
-                shutil.copy2(target_db, target_db_backup)
+            if not target_db.is_file():
+                raise HTTPException(status_code=400, detail="Select an existing LMZ vault folder containing db/lmz_main.db")
+            try:
+                # Read-only: selecting a folder must never initialize a new vault.
+                with closing(sqlite3.connect(target_db.as_uri() + "?mode=ro", uri=True)) as conn:
+                    columns = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
+                    if not {"hash", "file_extension", "mime_type"} <= columns:
+                        raise ValueError("missing vault item schema")
+            except (sqlite3.Error, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="Selected folder does not contain a readable LMZ vault database") from exc
+            snapshot = _capture_transition_snapshot(ctx)
+            target_db_backup = target_root.parent / f".lmz-relocate-db-{uuid.uuid4().hex}.bak"
+            shutil.copy2(target_db, target_db_backup)
             staged_config = _stage_workspace_config(ctx.config_path, candidate)
 
             # Validate and hydrate the candidate while the durable config still
@@ -866,7 +881,7 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
             candidate_ctx = replace(staged_ctx, config_path=ctx.config_path)
             target_paths_before = _capture_filesystem_paths(target_root)
             # Before activation, target files must be preserved if preparation fails.
-            # After this point activation may create the database and vault folders.
+            # After this point activation may migrate the DB or create support folders.
             target_mutation_started = True
             activate_runtime_context(candidate_ctx, hydrate=True)
             configure_terminal_logging()
@@ -885,7 +900,7 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
             os.environ.pop("LMZ_CONFIG_PATH", None)
             return {"status": "success", "vault_root": str(target_root)}
         except HTTPException as exc:
-            rollback_errors = _restore_transition_snapshot(snapshot)
+            rollback_errors = _restore_transition_snapshot(snapshot) if snapshot is not None else []
             if target_mutation_started and target_root is not None and target_paths_before is not None:
                 rollback_errors.extend(_remove_new_files(target_root, target_paths_before))
             if target_mutation_started and target_db_backup is not None and target_db_backup.exists() and target_root is not None:
@@ -896,7 +911,7 @@ def _relocate_vault_sync(vault_id: str, new_vault_root: str):
             _record_rollback_errors(exc, rollback_errors)
             raise
         except Exception as exc:
-            rollback_errors = _restore_transition_snapshot(snapshot)
+            rollback_errors = _restore_transition_snapshot(snapshot) if snapshot is not None else []
             if target_mutation_started and target_root is not None and target_paths_before is not None:
                 rollback_errors.extend(_remove_new_files(target_root, target_paths_before))
             if target_mutation_started and target_db_backup is not None and target_db_backup.exists() and target_root is not None:

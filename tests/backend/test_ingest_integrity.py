@@ -233,3 +233,44 @@ def test_ingest_search_delete_and_vault_switch_over_api(ingest_runtime, monkeypa
             conn.close()
     finally:
         stop_metadata_watchdog()
+
+
+def test_jxl_ingest_keeps_original_and_serves_browser_preview(ingest_runtime, monkeypatch):
+    from PIL import Image
+    from api.app import app
+    from jxl_preview import register_jxl_decoder
+    from metadata_index import stop_metadata_watchdog
+    from validators import get_mime_type
+
+    utils, _, processor, ctx, source, _, _ = ingest_runtime
+    source = source.with_suffix(".jxl")
+    register_jxl_decoder()
+    Image.new("RGBA", (16, 10), (10, 90, 230, 70)).save(source, format="JXL", lossless=True)
+    original = source.read_bytes()
+    monkeypatch.setattr(processor, "get_mime_type", get_mime_type)
+    monkeypatch.setattr("metadata_index.start_metadata_repair_worker", lambda **_kwargs: None)
+
+    try:
+        with TestClient(app) as client:
+            ok, message, result = processor.process_file(
+                source, app_settings_config(["image/jxl"], [".jxl"]), skip_similarity=True, ctx=ctx
+            )
+            assert ok, message
+            item_hash = result["file_hash"]
+            item_response = client.get(f"/api/items/{item_hash}")
+            assert item_response.status_code == 200
+            item = item_response.json()
+            assert item["mime_type"] == "image/jxl"
+            assert item["url"].endswith(".jxl")
+            stored = ctx.active_vault.assets_dir / item["url"].removeprefix("/vault/")
+            assert stored.read_bytes() == original
+
+            preview = client.get(item["url"])
+            assert preview.status_code == 200
+            assert preview.headers["content-type"] == "image/png"
+            assert preview.content.startswith(b"\x89PNG")
+            thumb = client.get(item["thumbnail_url"])
+            assert thumb.status_code == 200
+            assert thumb.headers["content-type"] == "image/jpeg"
+    finally:
+        stop_metadata_watchdog()

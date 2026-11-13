@@ -2,6 +2,7 @@ import base64
 import concurrent.futures
 import json
 import threading
+from io import BytesIO
 
 import pytest
 from fastapi.testclient import TestClient
@@ -80,6 +81,37 @@ def test_capture_preview_requires_api_key(monkeypatch, tmp_path):
     assert missing.status_code == 403
     assert ok.status_code == 200
     assert ok.content
+
+
+def test_capture_jxl_blob_previews_as_jpeg_and_rejects_invalid_signature(monkeypatch, tmp_path):
+    from PIL import Image
+    from jxl_preview import register_jxl_decoder
+
+    client, api_key = _client(monkeypatch, tmp_path)
+    headers = {"X-LMZ-API-KEY": api_key}
+    monkeypatch.setattr(client.capture_module, "get_app_settings", lambda: {
+        "ingestion": {"accepted_media": {"mime_types": ["image/jxl"], "extensions": [".jxl"]}}
+    })
+    register_jxl_decoder()
+    output = BytesIO()
+    Image.new("RGB", (12, 8), "red").save(output, format="JXL")
+    staged = client.post("/api/capture/stage", headers=headers,
+                         files={"file": ("blob", output.getvalue(), "image/jxl")})
+    assert staged.status_code == 200
+    assert staged.json()["original_name"].endswith(".jxl")
+    preview = client.get(f"/api/capture/preview/{staged.json()['staged_id']}", headers=headers)
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "image/jpeg"
+
+    invalid = client.post("/api/capture/stage", headers=headers,
+                          files={"file": ("blob", b"not a jxl", "image/jxl")})
+    assert invalid.status_code == 400
+
+    truncated = client.post("/api/capture/stage", headers=headers,
+                            files={"file": ("blob", b"\xff\x0abad", "image/jxl")})
+    assert truncated.status_code == 200  # Staging checks the signature, not the whole image.
+    response = client.get(f"/api/capture/preview/{truncated.json()['staged_id']}", headers=headers)
+    assert response.status_code == 422
 
 
 def test_capture_delete_removes_staged_artifacts(monkeypatch, tmp_path):

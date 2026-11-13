@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { VaultItem } from './types';
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
   import { apiUrl } from './api';
   import { isImageMedia, isVideoMedia } from './media';
   import { IconChevronLeft, IconChevronRight } from './icons';
@@ -18,16 +18,94 @@
   $: current = group.items[index];
   $: thumbnailUrl = current ? apiUrl(current.thumbnail_url) : '';
   $: fullUrl = current ? apiUrl(current.url) : '';
+  let thumbnailObjectUrl = '';
+  let thumbnailReady = false;
   let thumbFailed = false;
-  $: if (current) thumbFailed = false;
+  let activeThumbnailUrl = '';
+  let thumbnailController: AbortController | null = null;
+  let thumbnailRequestId = 0;
 
-  function handleThumbError(e: Event) {
-    const img = e.currentTarget as HTMLImageElement;
-    if (!thumbFailed) {
-      thumbFailed = true;
-      img.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' width='100' height='100'%3E%3Crect width='100%25' height='100%25' fill='%23222'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23555' font-family='sans-serif' font-size='10'%3ENo Preview%3C/text%3E%3C/svg%3E";
+  const MAX_THUMBNAIL_ATTEMPTS = 5;
+  const MAX_RETRY_DELAY_MS = 5000;
+
+  function retryDelay(response: Response) {
+    const retryAfter = response.headers.get('Retry-After');
+    if (!retryAfter) return 1000;
+    const seconds = Number(retryAfter);
+    const delayMs = Number.isFinite(seconds)
+      ? seconds * 1000
+      : Date.parse(retryAfter) - Date.now();
+    return Math.max(0, Math.min(MAX_RETRY_DELAY_MS, Number.isFinite(delayMs) ? delayMs : 1000));
+  }
+
+  function waitForRetry(ms: number, signal: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        reject(new DOMException('The operation was aborted.', 'AbortError'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  function resetThumbnail(url: string) {
+    thumbnailController?.abort();
+    thumbnailController = null;
+    if (thumbnailObjectUrl) URL.revokeObjectURL(thumbnailObjectUrl);
+    thumbnailObjectUrl = '';
+    thumbnailReady = false;
+    thumbFailed = false;
+    activeThumbnailUrl = url;
+    thumbnailRequestId += 1;
+  }
+
+  async function handleThumbError() {
+    thumbFailed = true;
+    const url = thumbnailUrl;
+    const requestId = ++thumbnailRequestId;
+    const controller = new AbortController();
+    thumbnailController?.abort();
+    thumbnailController = controller;
+
+    try {
+      for (let attempt = 0; attempt < MAX_THUMBNAIL_ATTEMPTS; attempt += 1) {
+        const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+        if (response.status === 503 && attempt < MAX_THUMBNAIL_ATTEMPTS - 1) {
+          await waitForRetry(retryDelay(response), controller.signal);
+          continue;
+        }
+        if (!response.ok) return;
+        const objectUrl = URL.createObjectURL(await response.blob());
+        if (requestId !== thumbnailRequestId || controller.signal.aborted) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        thumbnailObjectUrl = objectUrl;
+        thumbnailReady = true;
+        thumbFailed = false;
+        return;
+      }
+    } catch {
+      // A cancelled or failed request does not replace the placeholder.
     }
   }
+
+  function handleBlobThumbError() {
+    if (thumbnailObjectUrl) URL.revokeObjectURL(thumbnailObjectUrl);
+    thumbnailObjectUrl = '';
+    thumbnailReady = false;
+    thumbFailed = true;
+  }
+
+  $: if (thumbnailUrl !== activeThumbnailUrl) resetThumbnail(thumbnailUrl);
+  onDestroy(() => {
+    thumbnailController?.abort();
+    if (thumbnailObjectUrl) URL.revokeObjectURL(thumbnailObjectUrl);
+  });
   $: isSelected = group.items.some(item => item.hash === selectedHash || selectedHashes.has(item.hash));
   $: aspectStyle = (current?.width && current?.height)
     ? `aspect-ratio: ${current.width} / ${current.height}`
@@ -64,9 +142,17 @@
 <div class="tile-group {layout}" data-testid="vault-tile" class:selected={isSelected} on:click={select} on:keydown={(e) => { if (e.key === 'Enter' && current) dispatch('select', { item: current }); }} role="button" tabindex="0">
     <div class="media-stack" style={layout !== 'grid' ? aspectStyle : ''}>
         {#if current && isImageMedia(current)}
-            <img src={thumbnailUrl} alt="Vault Item" loading={eagerImages ? 'eager' : 'lazy'}
-                 width={current.width || undefined} height={current.height || undefined}
-                 on:error={handleThumbError} />
+            {#if thumbnailReady}
+                <img src={thumbnailObjectUrl} alt="Vault Item"
+                     width={current.width || undefined} height={current.height || undefined}
+                     on:error={handleBlobThumbError} />
+            {:else if !thumbFailed}
+                <img src={thumbnailUrl} alt="Vault Item" loading={eagerImages ? 'eager' : 'lazy'}
+                     width={current.width || undefined} height={current.height || undefined}
+                     on:error={handleThumbError} />
+            {:else}
+                <div class="thumbnail-placeholder" aria-label="Thumbnail unavailable">No Preview</div>
+            {/if}
         {:else if current && isVideoMedia(current)}
             <!-- svelte-ignore a11y-media-has-caption -->
             <video src={fullUrl} poster={thumbnailUrl} preload="none" muted loop
@@ -119,6 +205,8 @@
   }
 
   .media-stack { position: relative; width: 100%; background: #000; min-height: 100px; display: flex; align-items: center; justify-content: center; }
+
+  .thumbnail-placeholder { width: 100%; min-height: 100px; display: flex; align-items: center; justify-content: center; color: #555; font: 10px sans-serif; }
   
   .tile-group.grid .media-stack {
     flex-grow: 1;

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from runtime_context import WorkspaceContext, get_runtime_context
 from utils import setup_directories
+from vault_packages import BackupBusyError, vault_write_window
 
 
 QUEUE_FILES = {
@@ -19,6 +20,11 @@ QUEUE_LABELS = {
     "normal": "Normal",
     "force": "Force",
     "failed": "Failed",
+}
+QUEUE_DEFAULTS = {
+    "normal": "# LMZ Normal Pending Links\n",
+    "force": "# LMZ Force Pending Links\n",
+    "failed": "# LMZ Failed Links Log\n",
 }
 
 INGESTION_LOCK = threading.Lock()
@@ -87,12 +93,7 @@ def ensure_queue_files(ctx: WorkspaceContext | None = None):
     runtime = _ctx(ctx)
     with QUEUE_LOCK:
         setup_directories(runtime)
-        defaults = {
-            "normal": "# LMZ Normal Pending Links\n",
-            "force": "# LMZ Force Pending Links\n",
-            "failed": "# LMZ Failed Links Log\n",
-        }
-        for queue, text in defaults.items():
+        for queue, text in QUEUE_DEFAULTS.items():
             path = queue_path(queue, runtime)
             if not path.exists():
                 path.write_text(text, encoding="utf-8")
@@ -102,8 +103,18 @@ def read_queue(queue: str, ctx: WorkspaceContext | None = None) -> str:
     """Kuyruk metnini oku; ilk erişimde eksik kuyruk dosyalarını oluşturabilir."""
     runtime = _ctx(ctx)
     with QUEUE_LOCK:
-        ensure_queue_files(runtime)
-        return queue_path(queue, runtime).read_text(encoding="utf-8", errors="replace")
+        return _read_queue_files((queue,), runtime)[queue]
+
+
+def _read_queue_files(queues, runtime: WorkspaceContext) -> dict[str, str]:
+    paths = {queue: queue_path(queue, runtime) for queue in queues}
+    try:
+        with vault_write_window():
+            ensure_queue_files(runtime)
+    except BackupBusyError:
+        pass  # During a backup, read existing files without creating missing ones.
+    return {queue: path.read_text(encoding="utf-8", errors="replace") if path.is_file()
+            else QUEUE_DEFAULTS[queue] for queue, path in paths.items()}
 
 
 def write_queue(queue: str, text: str, ctx: WorkspaceContext | None = None):
@@ -259,11 +270,7 @@ def clean_url(url: str) -> str:
 def queue_counts(ctx: WorkspaceContext | None = None) -> dict[str, int]:
     runtime = _ctx(ctx)
     with QUEUE_LOCK:
-        ensure_queue_files(runtime)
-        return {
-            queue: len(parse_urls(queue_path(queue, runtime).read_text(encoding="utf-8", errors="replace")))
-            for queue in QUEUE_FILES
-        }
+        return {queue: len(parse_urls(text)) for queue, text in _read_queue_files(QUEUE_FILES, runtime).items()}
 
 
 def append_urls(queue: str, urls: list[str], ctx: WorkspaceContext | None = None):

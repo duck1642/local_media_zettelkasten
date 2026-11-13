@@ -8,7 +8,6 @@ import threading
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
 from logger import log_ingest_local
 from processor import process_file
 from pydantic import BaseModel
@@ -16,7 +15,7 @@ from runtime_context import WorkspaceContext, get_runtime_context
 from utils import atomic_write_text, calculate_file_hash, get_app_settings, utc_now, utc_now_str
 from validators import get_mime_type, is_allowed_mime
 
-from api.common import _require_api_key
+from api.common import _media_file_response, _require_api_key
 from api.guards import require_usable_vault_context
 
 router = APIRouter(dependencies=[Depends(require_usable_vault_context)])
@@ -85,7 +84,8 @@ def _clean_original_name(filename: str | None, staged_id: str, content_type: str
     invalid = '<>:"/\\|?*'
     safe = "".join("_" if ch in invalid or ord(ch) < 32 else ch for ch in name).strip(" .")
     if not safe or safe == "blob":
-        ext = mimetypes.guess_extension(str(content_type or "").split(";", 1)[0].strip()) or ".bin"
+        mime = str(content_type or "").split(";", 1)[0].strip().lower()
+        ext = ".jxl" if mime == "image/jxl" else mimetypes.guess_extension(mime) or ".bin"
         if ext == ".jpe":
             ext = ".jpg"
         safe = f"{staged_id}{ext}"
@@ -201,13 +201,18 @@ def _stage_capture_sync(file: UploadFile, source_url: str = "", media_url: str =
         except Exception:
             pass
 
-    mime_type = get_mime_type(stored_path) or str(file.content_type or "").split(";", 1)[0].strip().lower()
+    detected_mime = get_mime_type(stored_path)
+    declared_mime = str(file.content_type or "").split(";", 1)[0].strip().lower()
+    is_jxl = stored_path.suffix.lower() == ".jxl"
+    mime_type = detected_mime or declared_mime
     cfg = get_app_settings()
     accepted_media = cfg.get("ingestion", {}).get("accepted_media", {})
     allowed_mimes = accepted_media.get("mime_types", [])
     allowed_exts = {str(ext).lstrip(".").casefold() for ext in accepted_media.get("extensions", [])}
     ext = stored_path.suffix.lstrip(".").casefold()
-    if (allowed_mimes and not is_allowed_mime(mime_type, allowed_mimes)) or (allowed_exts and ext not in allowed_exts):
+    if ((is_jxl and detected_mime is None)
+            or (allowed_mimes and not is_allowed_mime(mime_type, allowed_mimes))
+            or (allowed_exts and ext not in allowed_exts)):
         try:
             stored_path.unlink()
         except OSError:
@@ -249,7 +254,7 @@ async def preview_capture(staged_id: str, request: Request):
 def _preview_capture_sync(staged_id: str):
     sidecar = _load_sidecar(staged_id)
     path = _staged_file_from_sidecar(sidecar)
-    return FileResponse(path, media_type=sidecar.get("mime_type") or get_mime_type(path) or "application/octet-stream")
+    return _media_file_response(path, sidecar.get("mime_type") or get_mime_type(path) or "application/octet-stream")
 
 
 @router.delete("/api/capture/stage/{staged_id}")

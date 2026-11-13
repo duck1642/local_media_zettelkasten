@@ -18,7 +18,7 @@ def default_triple() -> str:
 
 def pyinstaller_python() -> str:
     probe = subprocess.run(
-        [sys.executable, "-c", "import PyInstaller, fastapi"],
+        [sys.executable, "-c", "import PyInstaller, fastapi, pillow_jxl"],
         capture_output=True,
         text=True,
         check=False,
@@ -70,6 +70,8 @@ def main() -> int:
         "-m",
         "PyInstaller",
         "--onefile",
+        "--additional-hooks-dir",
+        str(Path(__file__).resolve().with_name("pyinstaller_hooks")),
         "--name",
         target_name,
         "--distpath",

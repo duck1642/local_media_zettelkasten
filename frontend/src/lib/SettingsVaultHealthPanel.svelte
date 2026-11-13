@@ -8,11 +8,14 @@
   export let vaultActive = '';
   export let healthVaultId = '';
   export let healthBusy = false;
+  export let thumbnailRebuildBusy = false;
+  export let thumbnailRebuildResult: { checked: number; generated: number; skipped: number; failed: number } | null = null;
   export let healthReport: any = null;
   export let healthDetailsOpen = false;
   export let repairErrors: Array<{ hash: string; storage_id: string; status: string; error: string }> = [];
   export let onAuditVaultHealth: () => void;
   export let onRepairVaultHealth: () => void;
+  export let onRebuildThumbnails: () => void;
 
   $: hasIssues = healthReport ? (healthReport.issue_count > 0) : false;
 </script>
@@ -32,10 +35,17 @@
     </select>
   </label>
   <div class="vault-health-actions">
-    <button class="settings-bold-button" type="button" on:click={onAuditVaultHealth} disabled={healthBusy || !healthVaultId}>Audit</button>
-    <button class="primary settings-bold-button" type="button" on:click={onRepairVaultHealth} disabled={healthBusy || !healthVaultId || healthVaultId !== vaultActive}>Repair</button>
+    <button class="settings-bold-button" type="button" on:click={onAuditVaultHealth} disabled={healthBusy || thumbnailRebuildBusy || !healthVaultId}>Audit</button>
+    <button class="primary settings-bold-button" type="button" on:click={onRepairVaultHealth} disabled={healthBusy || thumbnailRebuildBusy || !healthVaultId || healthVaultId !== vaultActive}>Repair</button>
+    <button class="settings-bold-button" type="button" on:click={onRebuildThumbnails} disabled={healthBusy || thumbnailRebuildBusy || !healthVaultId || healthVaultId !== vaultActive}>{thumbnailRebuildBusy ? 'Rebuilding thumbnails…' : 'Rebuild thumbnails'}</button>
   </div>
 </div>
+
+{#if thumbnailRebuildResult}
+  <div class="micro-desc" role="status">
+    Thumbnail rebuild: {thumbnailRebuildResult.generated.toLocaleString()} generated, {thumbnailRebuildResult.skipped.toLocaleString()} skipped, {thumbnailRebuildResult.failed.toLocaleString()} failed ({thumbnailRebuildResult.checked.toLocaleString()} checked).
+  </div>
+{/if}
 
 {#if healthReport}
   <div class="health-scorecard">

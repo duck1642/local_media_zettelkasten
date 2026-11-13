@@ -9,7 +9,7 @@ from artists import (
     resolve_artist_name,
 )
 from db.sqlite_operator import connect_database, init_database, normalize_source_url
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from logger import log_auth, log_dirs, startup_log_dirs
 from md_generator import MANUAL_FRONTMATTER_FIELDS, generate_markdown, load_note_frontmatter
@@ -208,7 +208,19 @@ def _file_response_under(root: Path, relative_path: str):
         raise HTTPException(status_code=404)
     if not candidate.is_file():
         raise HTTPException(status_code=404)
-    return FileResponse(candidate)
+    return _media_file_response(candidate)
+
+
+def _media_file_response(path: Path, media_type: str | None = None):
+    if path.suffix.lower() == ".jxl":
+        from jxl_preview import make_jxl_preview
+
+        try:
+            data, media_type = make_jxl_preview(path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=422, detail="Cannot decode JPEG XL") from exc
+        return Response(data, media_type=media_type)
+    return FileResponse(path, media_type=media_type)
 
 
 def _open_path_external(path: Path):
@@ -341,6 +353,7 @@ def _guess_review_mime_type(filename: str) -> str:
         ".jfif": "image/jpeg",
         ".png": "image/png",
         ".webp": "image/webp",
+        ".jxl": "image/jxl",
         ".gif": "image/gif",
         ".mp4": "video/mp4",
         ".webm": "video/webm",

@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 import yaml
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
@@ -50,7 +51,7 @@ def fresh_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *module_names
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
     for name in list(sys.modules):
-        if name in {"api", "utils", "runtime_context", "runtime_activation", "runtime_transitions", "queue_service", "md_generator", "media_lifecycle", "metadata_index", "metadata_maintenance", "processor", "external_ingestion", "thumbnails", "fingerprint", "artists", "platforms", "review_cache", "topics", "vaults", "vault_packages", "workspace_db", "ingest_control", "workspaces"} or name.startswith(("api.", "logger", "db.", "tagging", "downloaders")):
+        if name in {"api", "utils", "runtime_context", "runtime_activation", "runtime_transitions", "queue_service", "md_generator", "media_lifecycle", "metadata_index", "metadata_maintenance", "processor", "external_ingestion", "thumbnails", "thumbnail_store", "fingerprint", "artists", "platforms", "review_cache", "topics", "vaults", "vault_packages", "workspace_db", "ingest_control", "workspaces"} or name.startswith(("api.", "logger", "db.", "tagging", "downloaders")):
             del sys.modules[name]
     from app_paths import get_app_paths
     from config_repository import SettingsRepository, bootstrap_data_home
@@ -1042,8 +1043,39 @@ def test_vault_health_reports_orphans_and_stale_index_rows(monkeypatch, tmp_path
 
     assert report["status"] == "success"
     assert report["stale_index_rows"]["topics"] == 1
+    assert report["stale_index_rows"]["unindexed_or_changed_items"] == 1
     assert str(orphan) in report["orphans"]["assets"]
     assert report["issue_count"] >= 2
+
+
+def test_vault_health_repairs_orphan_thumbnail_rows_in_inactive_vault(monkeypatch, tmp_path):
+    vaults, store, metadata = fresh_backend(monkeypatch, tmp_path, "vaults", "thumbnail_store", "metadata_index")
+    vaults.create_vault("Inactive")
+    ctx = vaults.get_vault_context("inactive")
+    root = Path(ctx.active_vault.root)
+    thumb_db = root / "ui_cache" / "thumbs.db"
+    item_hash = "c1" * 32
+    with sqlite3.connect(ctx.active_vault.db_path) as conn:
+        conn.execute("INSERT INTO items(hash, storage_id, mime_type) VALUES (?, 'keep', 'image/jpeg')", (item_hash,))
+    assert store.write_thumbnail(thumb_db, "keep", 1, 2, b"keep", "image/png")
+    assert store.write_thumbnail(thumb_db, "orphan", 1, 2, b"orphan", "image/png")
+
+    before = vaults.audit_vault_health("inactive")
+    assert before["orphans"]["thumbnail_db_rows"] == ["orphan"]
+    assert before["stale_index_rows"]["unindexed_or_changed_items"] == 1
+    result = vaults.repair_vault("inactive", actions=["derived_cache"], confirm_destructive=True)
+    assert result["derived_cache"]["removed"] == 1
+    assert result["after"]["orphans"]["thumbnail_db_rows"] == []
+    assert store.read_thumbnail(thumb_db, "keep", 1, 2) == (b"keep", "image/png")
+
+    note = root / "vault" / "notes" / item_hash[:2] / "keep.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntopics: [Before]\n---\n", encoding="utf-8")
+    with sqlite3.connect(ctx.active_vault.db_path) as conn:
+        metadata.rebuild_all_metadata(conn, target_ctx=ctx)
+    assert vaults.audit_vault_health("inactive")["stale_index_rows"]["unindexed_or_changed_items"] == 0
+    note.write_text("---\ntopics: [Changed topic]\n---\n", encoding="utf-8")
+    assert vaults.audit_vault_health("inactive")["stale_index_rows"]["unindexed_or_changed_items"] == 1
 
 
 def test_vault_repair_wd_tagging_creates_cache_and_reindexes(monkeypatch, tmp_path):
@@ -1154,7 +1186,7 @@ def test_vault_wd_repair_reports_locked_wrong_shard_and_cleans_after_retry(monke
 
 
 def test_vault_backup_export_and_import_package(monkeypatch, tmp_path):
-    vaults = fresh_backend(monkeypatch, tmp_path, "vaults")[0]
+    vaults, store = fresh_backend(monkeypatch, tmp_path, "vaults", "thumbnail_store")
     source = vaults.create_vault("Portable Vault")
     source_root = Path(next(item["root"] for item in source["items"] if item["id"] == "portable-vault"))
     marker = source_root / "vault" / "notes" / "aa" / "marker.md"
@@ -1163,6 +1195,22 @@ def test_vault_backup_export_and_import_package(monkeypatch, tmp_path):
     review_marker = source_root / "review" / "pending.json"
     review_marker.parent.mkdir(parents=True, exist_ok=True)
     review_marker.write_text("review-state", encoding="utf-8")
+    (source_root / "db" / ".gitkeep").touch()
+    (source_root / "capture_staging").mkdir()
+    (source_root / "capture_staging" / "temporary.jpg").write_bytes(b"temporary")
+    item_hash = "ac" * 32
+    item_id = "package-asset"
+    note = source_root / "vault" / "notes" / item_hash[:2] / f"{item_id}.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntopics: [Package Topic]\nwd_tags: [Package Tag]\n---\n", encoding="utf-8")
+    with sqlite3.connect(source_root / "db" / "lmz_main.db") as conn:
+        conn.execute("INSERT INTO items(hash, storage_id, phash, mime_type, thumbnail_status) VALUES (?, ?, 'abc', 'image/jpeg', 'ready')", (item_hash, item_id))
+        conn.execute("INSERT INTO item_topics(item_hash, topic, topic_norm) VALUES (?, 'Old Topic', 'old topic')", (item_hash,))
+    thumb_db = source_root / "ui_cache" / "thumbs.db"
+    assert store.write_thumbnail(thumb_db, "test", 1, 2, b"cached bytes", "image/png")
+    tag_cache = source_root / "wd-tags" / item_hash[:2] / f"{item_id}.json"
+    tag_cache.parent.mkdir(parents=True)
+    tag_cache.write_text('{"status":"ok","tags":[{"name":"Package Tag","score":0.94}]}', encoding="utf-8")
 
     with pytest.raises(ValueError, match="confirmation"):
         vaults.backup_vault("portable-vault")
@@ -1186,6 +1234,11 @@ def test_vault_backup_export_and_import_package(monkeypatch, tmp_path):
         assert manifest["contents"]["logs"] is True
         assert "db/lmz_main.db" in archive.namelist()
         assert "vault/notes/aa/marker.md" in archive.namelist()
+        assert "db/.gitkeep" not in archive.namelist()
+        assert "capture_staging/temporary.jpg" not in archive.namelist()
+        assert manifest["contents"]["thumbnails"] is False
+        assert "ui_cache/thumbs.db" not in archive.namelist()
+        assert archive.read(tag_cache.relative_to(source_root).as_posix()) == tag_cache.read_bytes()
 
     with zipfile.ZipFile(exported["package_path"], "r") as archive:
         manifest = yaml.safe_load(archive.read("lmz-package.yaml").decode("utf-8"))
@@ -1197,6 +1250,8 @@ def test_vault_backup_export_and_import_package(monkeypatch, tmp_path):
         assert not any(name.startswith("logs/") for name in names)
         assert not any(name.startswith("queues/") for name in names)
         assert not any(name.startswith("review/") for name in names)
+        assert "ui_cache/thumbs.db" not in names
+        assert not any(name.startswith("wd-tags/") for name in names)
 
     with zipfile.ZipFile(exported_with_review["package_path"], "r") as archive:
         manifest = yaml.safe_load(archive.read("lmz-package.yaml").decode("utf-8"))
@@ -1228,7 +1283,18 @@ def test_vault_backup_export_and_import_package(monkeypatch, tmp_path):
 
     assert (imported_root / "vault" / "notes" / "aa" / "marker.md").read_text(encoding="utf-8") == "portable"
 
-    restore_preview = vaults.preview_restore_backup_package(backup["package_path"])
+    legacy_backup = tmp_path / "legacy.lmzbackup.zip"
+    with zipfile.ZipFile(backup["package_path"]) as original, zipfile.ZipFile(legacy_backup, "w") as legacy:
+        for member in original.infolist():
+            data = original.read(member)
+            if member.filename == "lmz-package.yaml":
+                manifest = yaml.safe_load(data)
+                manifest["contents"]["thumbnails"] = True
+                manifest["counts"]["files"] += 1
+                data = yaml.safe_dump(manifest).encode("utf-8")
+            legacy.writestr(member, data)
+        legacy.write(thumb_db, "ui_cache/thumbs.db")
+    restore_preview = vaults.preview_restore_backup_package(legacy_backup)
     assert restore_preview["package_type"] == "lmz_vault_backup"
     assert restore_preview["target_name"] == "Restored Portable Vault"
     assert restore_preview["target_id"] == "restored-portable-vault"
@@ -1238,17 +1304,126 @@ def test_vault_backup_export_and_import_package(monkeypatch, tmp_path):
         vaults.restore_backup_package(backup["package_path"], package_fingerprint_value="bad", confirm=True)
 
     restored = vaults.restore_backup_package(
-        backup["package_path"],
+        legacy_backup,
         package_fingerprint_value=restore_preview["package_fingerprint"],
         confirm=True,
     )
     restored_root = Path(next(item["root"] for item in restored["items"] if item["id"] == "restored-portable-vault"))
     assert (restored_root / "vault" / "notes" / "aa" / "marker.md").read_text(encoding="utf-8") == "portable"
     assert (restored_root / "review" / "pending.json").read_text(encoding="utf-8") == "review-state"
+    assert not (restored_root / "ui_cache" / "thumbs.db").exists()
+    assert (restored_root / tag_cache.relative_to(source_root)).read_bytes() == tag_cache.read_bytes()
+
+    for target_id, root in (("imported-portable", imported_root), ("restored-portable-vault", restored_root)):
+        metadata_index = importlib.import_module("metadata_index")
+        with sqlite3.connect(root / "db" / "lmz_main.db") as conn:
+            assert metadata_index.metadata_index_ready(conn)
+            assert metadata_index.stale_metadata_count(conn, ctx=vaults.get_vault_context(target_id)) == 0
+            assert conn.execute("SELECT topic FROM item_topics").fetchall() == [("Package Topic",)]
+            assert conn.execute("SELECT tag FROM item_wd_tags").fetchall() == [("Package Tag",)]
+            assert conn.execute("SELECT phash, thumbnail_status FROM items").fetchone() == ("abc", "pending")
 
     second_restore_preview = vaults.preview_restore_backup_package(backup["package_path"])
     assert second_restore_preview["target_name"] == "Restored Portable Vault 2"
     assert second_restore_preview["target_id"] == "restored-portable-vault-2"
+
+
+def test_backup_blocks_writes_but_not_reads_until_zip_finishes(monkeypatch, tmp_path):
+    vaults, app_module, packages, queues = fresh_backend(
+        monkeypatch, tmp_path, "vaults", "api.app", "vault_packages", "queue_service",
+    )
+    vaults.create_vault("Other Vault")
+    ctx = vaults.get_vault_context("default")
+    queue_path = queues.queue_path("normal", ctx)
+    queue_path.unlink(missing_ok=True)
+    snapshot_started = threading.Event()
+    allow_snapshot = threading.Event()
+    snapshot = vaults.snapshot_sqlite_database
+
+    def hold_snapshot(source, target):
+        snapshot_started.set()
+        assert allow_snapshot.wait(10)
+        return snapshot(source, target)
+
+    monkeypatch.setattr(vaults, "snapshot_sqlite_database", hold_snapshot)
+    client = TestClient(app_module.app)
+    headers = {"X-LMZ-API-KEY": app_module.runtime._api_key()}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, "/api/vaults/other-vault/backup", json={"confirm": True}, headers=headers)
+        try:
+            assert snapshot_started.wait(10)
+            assert client.get("/api/vaults").status_code == 200
+            assert client.get("/api/queue/normal").status_code == 200
+            assert not queue_path.exists()
+            assert client.post("/api/vaults", json={"name": "Blocked"}, headers=headers).status_code == 409
+            assert client.post("/api/vaults/default/backup", json={"confirm": True}, headers=headers).status_code == 409
+        finally:
+            allow_snapshot.set()
+        assert future.result(timeout=10).status_code == 200
+
+    with packages.vault_write_window():
+        assert client.post("/api/vaults/other-vault/backup", json={"confirm": True}, headers=headers).status_code == 409
+    assert client.post("/api/vaults", json={"name": "Unblocked"}, headers=headers).status_code == 200
+
+
+def test_failed_backup_releases_write_window(monkeypatch, tmp_path):
+    vaults, packages = fresh_backend(monkeypatch, tmp_path, "vaults", "vault_packages")
+    vaults.create_vault("Backup Failure")
+
+    def fail_snapshot(_source, _target):
+        raise OSError("snapshot failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vaults, "snapshot_sqlite_database", fail_snapshot)
+        with pytest.raises(OSError, match="snapshot failed"):
+            vaults.backup_vault("backup-failure", confirm=True)
+    with packages.vault_write_window():
+        pass
+    assert vaults.backup_vault("backup-failure", confirm=True)["status"] == "success"
+
+
+def test_backup_defers_read_triggered_metadata_refresh(monkeypatch, tmp_path):
+    utils, db, metadata, packages = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "metadata_index", "vault_packages",
+    )
+    item_hash = "a9" * 32
+    conn = insert_mock_item(db, item_hash)
+    try:
+        write_compact_note(utils, conn, item_hash, "---\ntopics: [Original]\n---\n")
+        metadata.reindex_item_metadata(conn, item_hash)
+        conn.commit()
+        write_compact_note(utils, conn, item_hash, "---\ntopics: [Updated Topic]\n---\n")
+        with packages.vault_backup_window():
+            assert metadata.indexed_item_metadata(conn, item_hash)["topics"] == ["Original"]
+            assert not conn.in_transaction
+        assert metadata.indexed_item_metadata(conn, item_hash)["topics"] == ["Updated Topic"]
+    finally:
+        conn.close()
+
+
+def test_backup_serves_cached_thumbnail_without_generating_a_new_one(monkeypatch, tmp_path):
+    utils, db, api, packages, thumbnails = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api", "vault_packages", "thumbnails",
+    )
+    from PIL import Image
+
+    cached_hash, uncached_hash = "d1" * 32, "d2" * 32
+    for item_hash in (cached_hash, uncached_hash):
+        conn = insert_mock_item(db, item_hash)
+        storage_id = storage_id_for(conn, item_hash)
+        conn.close()
+        asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8)).save(asset)
+        if item_hash == cached_hash:
+            thumbnails.ensure_thumbnail(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+
+    with packages.vault_backup_window():
+        assert api.library._get_thumbnail_sync(cached_hash).status_code == 200
+        with pytest.raises(HTTPException) as exc:
+            api.library._get_thumbnail_sync(uncached_hash)
+        assert exc.value.status_code == 503
+    assert api.library._get_thumbnail_sync(uncached_hash).status_code == 200
 
 
 def test_vault_package_skips_symlinked_files(monkeypatch, tmp_path):
@@ -1390,8 +1565,8 @@ def test_vault_import_rolls_back_on_final_move_failure(monkeypatch, tmp_path):
     target_root = ctx.root / "data" / "vaults" / "move-failure-import"
 
     def fail_rename(stage_root, final_root):
-        final_root.mkdir(parents=True)
-        (final_root / "partial.txt").write_text("partial", encoding="utf-8")
+        assert stage_root.is_dir()
+        assert not final_root.exists()
         raise RuntimeError("final move failed")
 
     monkeypatch.setattr(vaults, "_rename_import_stage", fail_rename)
@@ -1408,6 +1583,25 @@ def test_vault_import_rolls_back_on_final_move_failure(monkeypatch, tmp_path):
     assert "move-failure-import" not in config["vaults"]
     imports_tmp = ctx.root / ".tmp" / "imports"
     assert not imports_tmp.exists() or not any(imports_tmp.iterdir())
+
+
+def test_vault_import_does_not_delete_directory_it_failed_to_promote(monkeypatch, tmp_path):
+    (vaults,) = fresh_backend(monkeypatch, tmp_path, "vaults")
+    vaults.create_vault("Source")
+    package = vaults.export_vault("source", confirm=True)
+    preview = vaults.preview_import_vault_package(package["package_path"])
+    target_root = vaults._ctx().root / "data" / "vaults" / "conflict"
+
+    def conflict(_stage_root, final_root):
+        final_root.mkdir()
+        (final_root / "unrelated.txt").write_text("keep", encoding="utf-8")
+        raise FileExistsError("directory appeared before promotion")
+
+    monkeypatch.setattr(vaults, "_rename_import_stage", conflict)
+    with pytest.raises(FileExistsError):
+        vaults.import_vault_package(package["package_path"], "Conflict", preview["package_fingerprint"], confirm=True)
+
+    assert (target_root / "unrelated.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_active_workspace_and_vault_switches_are_preflight_guarded(monkeypatch, tmp_path):
@@ -1497,6 +1691,7 @@ def test_create_merged_vault_skips_exact_duplicates_and_keeps_sources(monkeypatc
             """,
             (item_hash, storage_id, filename),
         )
+        conn.execute("UPDATE items SET thumbnail_status = 'ready' WHERE hash = ?", (item_hash,))
         conn.commit()
         conn.close()
         asset = root / "vault" / "assets" / item_hash[:2] / f"{storage_id}.jpg"
@@ -1504,7 +1699,7 @@ def test_create_merged_vault_skips_exact_duplicates_and_keeps_sources(monkeypatc
         asset.parent.mkdir(parents=True, exist_ok=True)
         note.parent.mkdir(parents=True, exist_ok=True)
         asset.write_bytes(filename.encode("utf-8"))
-        note.write_text(f"---\nstorage_id: {storage_id}\n---\n", encoding="utf-8")
+        note.write_text(f"---\nstorage_id: {storage_id}\ntopics: [Merged Topic]\n---\n", encoding="utf-8")
 
     duplicate_hash = "cd" * 32
     unique_hash = "ef" * 32
@@ -1527,6 +1722,9 @@ def test_create_merged_vault_skips_exact_duplicates_and_keeps_sources(monkeypatc
     try:
         merged_rows = merged_conn.execute("SELECT hash, storage_id FROM items ORDER BY hash").fetchall()
         assert len(merged_rows) == 2
+        assert merged_conn.execute("SELECT DISTINCT thumbnail_status FROM items").fetchall() == [("pending",)]
+        assert merged_conn.execute("SELECT COUNT(*) FROM item_metadata_files").fetchone() == (2,)
+        assert merged_conn.execute("SELECT topic, COUNT(*) FROM item_topics GROUP BY topic").fetchall() == [("Merged Topic", 2)]
         assert {row[0] for row in merged_rows} == {duplicate_hash, unique_hash}
         assert all(row[1] not in {"source-a-old", "source-b-old", "source-b-unique"} for row in merged_rows)
         assert source_a_conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
@@ -1568,12 +1766,18 @@ def test_create_merged_vault_rolls_back_new_vault_on_copy_failure(monkeypatch, t
     def fail_copy(source, target):
         raise RuntimeError("copy failed")
 
-    monkeypatch.setattr(vaults, "_copy_if_exists", fail_copy)
-    with pytest.raises(RuntimeError, match="copy failed"):
-        vaults.merge_vaults_to_new("Merged Failure", ["source-a", "source-b"])
+    with monkeypatch.context() as patch:
+        patch.setattr(vaults, "_copy_if_exists", fail_copy)
+        with pytest.raises(RuntimeError, match="copy failed"):
+            vaults.merge_vaults_to_new("Merged Failure", ["source-a", "source-b"])
 
     current = {item["id"]: item for item in vaults.vault_list()}
     assert "merged-failure" not in current
+
+    asset.unlink()
+    with pytest.raises(ValueError, match="source asset is missing"):
+        vaults.merge_vaults_to_new("Missing Source Asset", ["source-a", "source-b"])
+    assert "missing-source-asset" not in {item["id"] for item in vaults.vault_list()}
 
 
 def test_app_settings_accessor_returns_fresh_secret_free_documents(monkeypatch, tmp_path):
@@ -2963,7 +3167,7 @@ def test_metadata_status_deep_uses_streaming_stale_count(monkeypatch, tmp_path):
 
     monkeypatch.setattr(metadata_index, "ensure_metadata_schema", lambda conn: None)
     monkeypatch.setattr(metadata_index, "metadata_index_ready", lambda conn: False)
-    monkeypatch.setattr(metadata_index, "_row_stale", lambda row: row[0] == "a")
+    monkeypatch.setattr(metadata_index, "_row_stale", lambda row, ctx=None: row[0] == "a")
 
     status = metadata_index.metadata_index_status(Conn(), deep=True)
 
@@ -3571,6 +3775,12 @@ def test_delete_and_replace_cleanup_remove_thumbnails(monkeypatch, tmp_path):
 
     replace_paths = write_item_files(replace_hash, replace_storage)
     delete_paths = write_item_files(delete_hash, delete_storage)
+    assert thumbnails.write_thumbnail(
+        thumbnails.thumbnail_db_path(), replace_storage, 1, 5, b"cached-thumb", "image/jpeg"
+    )
+    assert thumbnails.write_thumbnail(
+        thumbnails.thumbnail_db_path(), delete_storage, 1, 5, b"cached-thumb", "image/jpeg"
+    )
     monkeypatch.setattr(api_library.search_manager, "remove_indexes_batch", lambda *args, **kwargs: None)
 
     assert api_library._delete_item_after_replacement(replace_hash)["status"] == "deleted"
@@ -3578,6 +3788,14 @@ def test_delete_and_replace_cleanup_remove_thumbnails(monkeypatch, tmp_path):
 
     for path in replace_paths + delete_paths:
         assert not path.exists()
+    cache_conn = sqlite3.connect(thumbnails.thumbnail_db_path())
+    try:
+        assert cache_conn.execute(
+            "SELECT COUNT(*) FROM thumbnails WHERE storage_id IN (?, ?)",
+            (replace_storage, delete_storage),
+        ).fetchone()[0] == 0
+    finally:
+        cache_conn.close()
 
 
 def test_delete_stage_failure_keeps_db_row_and_files(monkeypatch, tmp_path):
@@ -3924,13 +4142,10 @@ def test_delete_waits_for_inflight_thumbnail_and_removes_published_file(monkeypa
     started = threading.Event()
     release = threading.Event()
 
-    def slow_generate(asset_path, generated_hash, generated_storage_id, ctx=None):
+    def slow_generate(asset_path, output_format):
         started.set()
         assert release.wait(timeout=3)
-        target = thumbnails.thumbnail_path_for(generated_hash, generated_storage_id, ctx)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"thumb")
-        return target
+        return b"thumb"
 
     monkeypatch.setattr(thumbnails, "generate_image_thumbnail", slow_generate)
     monkeypatch.setattr(api_library.search_manager, "remove_indexes_batch", lambda *args, **kwargs: None)
@@ -5227,7 +5442,7 @@ def test_thumbnail_repair_uses_shared_helper_and_skips_fresh(monkeypatch, tmp_pa
 
     def fake_ensure(item_hash, extension, mime_type, wait=True, storage_id=None):
         calls.append((item_hash, extension, mime_type, wait, storage_id))
-        return thumbnails.thumbnail_path_for(item_hash, storage_id)
+        return b"thumb", "image/jpeg"
 
     monkeypatch.setattr(thumbnails, "ensure_thumbnail", fake_ensure)
 
@@ -5239,7 +5454,7 @@ def test_thumbnail_repair_uses_shared_helper_and_skips_fresh(monkeypatch, tmp_pa
     conn.close()
 
 
-def test_thumbnail_repair_removes_stale_image_and_video_copies_even_when_fresh(monkeypatch, tmp_path):
+def test_thumbnail_repair_preserves_legacy_image_and_video_copies_even_when_fresh(monkeypatch, tmp_path):
     utils, sqlite_operator, thumbnails = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails")
     image_hash = "c1" * 32
     video_hash = "c2" * 32
@@ -5277,17 +5492,17 @@ def test_thumbnail_repair_removes_stale_image_and_video_copies_even_when_fresh(m
 
     assert result["generated"] == 0
     assert result["skipped"] == 2
-    assert result["stale_removed"] == 3
+    assert result["stale_removed"] == 0
     assert result["cleanup_errors"] == []
     assert image_thumb.exists()
     assert video_thumb.exists()
-    assert not stale_image.exists()
-    assert not stale_video.exists()
-    assert not stale_video_image_variant.exists()
+    assert stale_image.exists()
+    assert stale_video.exists()
+    assert stale_video_image_variant.exists()
     conn.close()
 
 
-def test_thumbnail_repair_reports_stale_cleanup_failure(monkeypatch, tmp_path):
+def test_thumbnail_repair_preserves_stale_legacy_copy(monkeypatch, tmp_path):
     utils, sqlite_operator, thumbnails = fresh_backend(monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails")
     item_hash = "c3" * 32
     conn = insert_mock_item(sqlite_operator, item_hash)
@@ -5300,22 +5515,68 @@ def test_thumbnail_repair_reports_stale_cleanup_failure(monkeypatch, tmp_path):
         path.write_bytes(b"data")
     now = time.time() + 10
     os.utime(canonical, (now, now))
-    real_unlink = Path.unlink
-
-    def fail_stale_unlink(self, *args, **kwargs):
-        if self == stale:
-            raise OSError("stale thumbnail locked")
-        return real_unlink(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", fail_stale_unlink)
-
     result = thumbnails.repair_missing_thumbnails(conn, limit=10)
 
     assert result["stale_removed"] == 0
-    assert result["cleanup_errors"]
-    assert result["cleanup_errors"][0]["path"] == str(stale)
+    assert result["cleanup_errors"] == []
     assert stale.exists()
     conn.close()
+
+
+def test_thumbnail_lazy_migration_returns_exact_legacy_bytes_without_deleting_file(monkeypatch, tmp_path):
+    utils, sqlite_operator, thumbnails = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails"
+    )
+    item_hash = "c5" * 32
+    conn = insert_mock_item(sqlite_operator, item_hash)
+    storage_id = storage_id_for(conn, item_hash)
+    conn.close()
+    asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+    legacy = thumbnails.thumbnail_path_for(item_hash, storage_id)
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    asset.write_bytes(b"source")
+    from PIL import Image
+
+    from io import BytesIO
+
+    image_data = BytesIO()
+    Image.new("RGB", (8, 8), color="blue").save(image_data, format="JPEG")
+    expected = image_data.getvalue()
+    legacy.write_bytes(expected)
+    now = time.time() + 2
+    os.utime(legacy, (now, now))
+
+    result = thumbnails.ensure_thumbnail(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+
+    assert result == (expected, "image/jpeg")
+    assert legacy.read_bytes() == expected
+    cached = thumbnails.read_thumbnail(
+        thumbnails.thumbnail_db_path(), storage_id, asset.stat().st_mtime_ns, asset.stat().st_size
+    )
+    assert cached == result
+
+
+def test_thumbnail_generation_returns_bytes_when_cache_write_fails(monkeypatch, tmp_path):
+    from PIL import Image
+
+    utils, sqlite_operator, thumbnails = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails"
+    )
+    item_hash = "c6" * 32
+    conn = insert_mock_item(sqlite_operator, item_hash)
+    storage_id = storage_id_for(conn, item_hash)
+    conn.close()
+    asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (8, 8), color="red").save(asset, format="JPEG")
+    monkeypatch.setattr(thumbnails, "write_thumbnail", lambda *args, **kwargs: False)
+
+    result = thumbnails.ensure_thumbnail(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+
+    assert result[0].startswith(b"\xff\xd8")
+    assert result[1] == "image/jpeg"
+    assert not thumbnails.thumbnail_path_for(item_hash, storage_id).exists()
 
 
 def test_thumbnail_and_wd_repairs_ignore_non_media_rows(monkeypatch, tmp_path):
@@ -5378,6 +5639,79 @@ def test_thumbnail_api_returns_503_when_generation_is_busy(monkeypatch, tmp_path
 
     assert exc.value.status_code == 503
     assert calls == [(item_hash, *item)]
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_jxl_gallery_queues_one_thumbnail_and_never_redirects(monkeypatch, tmp_path, write_fails):
+    from PIL import Image
+    from jxl_preview import register_jxl_decoder
+
+    utils, sqlite_operator, library, thumbnails, vaults = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "api.library", "thumbnails", "vaults"
+    )
+    item_hash = "c" * 64
+    conn = insert_mock_item(sqlite_operator, item_hash)
+    try:
+        storage_id = storage_id_for(conn, item_hash)
+        conn.execute("UPDATE items SET file_extension='.jxl', mime_type='image/jxl' WHERE hash=?", (item_hash,))
+        conn.commit()
+    finally:
+        conn.close()
+    asset = utils.asset_path_for(item_hash, ".jxl", "image/jxl", storage_id)
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    register_jxl_decoder()
+    Image.new("RGB", (12, 8), "blue").save(asset, format="JXL")
+
+    jobs = []
+    monkeypatch.setattr(thumbnails._BACKGROUND, "submit", jobs.append)
+    monkeypatch.setattr(thumbnails, "_configured_format", lambda: "png")
+    if write_fails:
+        monkeypatch.setattr(thumbnails, "write_thumbnail", lambda *args: False)
+    for _ in range(2):
+        with pytest.raises(HTTPException) as pending:
+            library._get_thumbnail_sync(item_hash)
+        assert pending.value.status_code == 503
+        assert pending.value.headers["Retry-After"] == "1"
+    assert len(jobs) == 1
+    jobs[0]()
+
+    if write_fails:
+        with pytest.raises(HTTPException) as failed:
+            library._get_thumbnail_sync(item_hash)
+        assert failed.value.status_code == 404
+        assert len(jobs) == 1
+    else:
+        response = library._get_thumbnail_sync(item_hash)
+        assert response.media_type == "image/png"
+        assert response.body.startswith(b"\x89PNG")
+        assert not vaults.audit_vault_health("default")["missing_files"]["thumb"]
+
+
+def test_failed_rebuild_preserves_previous_thumbnail(monkeypatch, tmp_path):
+    from PIL import Image
+
+    utils, sqlite_operator, thumbnails = fresh_backend(
+        monkeypatch, tmp_path, "utils", "db.sqlite_operator", "thumbnails"
+    )
+    item_hash = "e" * 64
+    conn = insert_mock_item(sqlite_operator, item_hash)
+    try:
+        storage_id = storage_id_for(conn, item_hash)
+        asset = utils.asset_path_for(item_hash, ".jpg", "image/jpeg", storage_id)
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (12, 8), "red").save(asset)
+        old = thumbnails.ensure_thumbnail(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)
+        assert old[1] == "image/jpeg"
+        monkeypatch.setattr(thumbnails, "_configured_format", lambda: "webp")
+        assert thumbnails.ensure_thumbnail(item_hash, ".jpg", "image/jpeg", storage_id=storage_id) == old
+        with monkeypatch.context() as patch:
+            patch.setattr(thumbnails, "write_thumbnail", lambda *args: False)
+            assert thumbnails.repair_missing_thumbnails(conn, rebuild=True)["failed"] == 1
+        assert thumbnails.ensure_thumbnail(item_hash, ".jpg", "image/jpeg", storage_id=storage_id) == old
+        assert thumbnails.repair_missing_thumbnails(conn, rebuild=True)["generated"] == 1
+        assert thumbnails.ensure_thumbnail(item_hash, ".jpg", "image/jpeg", storage_id=storage_id)[1] == "image/webp"
+    finally:
+        conn.close()
 
 
 def test_thumbnail_generation_is_owned_by_thumbnail_module():
@@ -6039,14 +6373,38 @@ def test_delete_vault_config_failure_restores_tree_and_config(monkeypatch, tmp_p
     assert "delete-failure" in vaults._read_config()["vaults"]
 
 
+@pytest.mark.parametrize("db_state", ["missing", "invalid", "unrelated"])
+def test_relocation_rejects_non_vault_folder(monkeypatch, tmp_path, db_state):
+    vaults, api = fresh_backend(monkeypatch, tmp_path, "vaults", "api")
+    ctx = vaults._ctx()
+    target = ctx.root / "data" / "vaults" / "wrong"
+    target.mkdir(parents=True)
+    db = target / "db" / "lmz_main.db"
+    if db_state != "missing":
+        db.parent.mkdir()
+        if db_state == "invalid":
+            db.write_bytes(b"not SQLite")
+        else:
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    before = ctx.config_path.read_bytes()
+    paths = set(target.rglob("*"))
+    with pytest.raises(HTTPException) as exc:
+        api.runtime._relocate_vault_sync("default", str(target))
+    assert exc.value.status_code == 400
+    assert ctx.config_path.read_bytes() == before
+    assert set(target.rglob("*")) == paths
+
+
 def test_relocation_activation_failure_restores_old_path_and_removes_new_files(monkeypatch, tmp_path):
     vaults, api, runtime_context = fresh_backend(monkeypatch, tmp_path, "vaults", "api", "runtime_context")
     ctx = vaults._ctx()
     old_root = ctx.active_vault.root
     target_root = ctx.root / "data" / "vaults" / "relocation-failure"
-    target_root.mkdir(parents=True)
+    vaults.create_vault_layout(target_root)
     existing_empty_dir = target_root / "user-created" / "empty"
     existing_empty_dir.mkdir(parents=True)
+    existing_paths = set(target_root.rglob("*"))
     before_config = ctx.config_path.read_bytes()
     search_manager_module = importlib.import_module("db.search_manager")
     original_hydrate = search_manager_module.search_manager.hydrate
@@ -6064,10 +6422,7 @@ def test_relocation_activation_failure_restores_old_path_and_removes_new_files(m
     assert exc.value.status_code == 500
     assert ctx.config_path.read_bytes() == before_config
     assert runtime_context.get_runtime_context().active_vault.root == old_root
-    assert {
-        path.relative_to(target_root)
-        for path in target_root.rglob("*")
-    } == {Path("user-created"), Path("user-created/empty")}
+    assert set(target_root.rglob("*")) == existing_paths
 
 
 def test_relocation_rejection_preserves_existing_outside_target_files(monkeypatch, tmp_path):
@@ -6095,7 +6450,7 @@ def test_relocation_snapshot_failure_preserves_existing_target_files(monkeypatch
     vaults, api, runtime_context = fresh_backend(monkeypatch, tmp_path, "vaults", "api", "runtime_context")
     ctx = vaults._ctx()
     target_root = ctx.root / "data" / "vaults" / "snapshot-failure"
-    target_root.mkdir(parents=True)
+    vaults.create_vault_layout(target_root)
     marker = target_root / "user-data.txt"
     marker.write_text("keep this file", encoding="utf-8")
     before_config = ctx.config_path.read_bytes()
@@ -6118,7 +6473,8 @@ def test_relocation_config_failure_restores_old_path_and_config(monkeypatch, tmp
     ctx = vaults._ctx()
     old_root = ctx.active_vault.root
     target_root = ctx.root / "data" / "vaults" / "relocation-config-failure"
-    target_root.mkdir(parents=True)
+    vaults.create_vault_layout(target_root)
+    existing_paths = set(target_root.rglob("*"))
     before_config = ctx.config_path.read_bytes()
 
     def fail_config_write(config, ctx=None):
@@ -6131,7 +6487,7 @@ def test_relocation_config_failure_restores_old_path_and_config(monkeypatch, tmp
     assert exc.value.status_code == 500
     assert ctx.config_path.read_bytes() == before_config
     assert runtime_context.get_runtime_context().active_vault.root == old_root
-    assert not any(target_root.rglob("*"))
+    assert set(target_root.rglob("*")) == existing_paths
 
 
 def test_vault_transition_uses_a1_lock(monkeypatch, tmp_path):

@@ -28,6 +28,7 @@
     fetchWorkspaces,
     importVaultPackageApi,
     packageVault,
+    rebuildVaultThumbnailsApi,
     previewImportVaultPackageApi,
     previewRestoreBackupPackageApi,
     previewMergedVaultApi,
@@ -98,6 +99,10 @@
   let healthVaultId = '';
   let selectedHealthVaultName = '';
   let healthBusy = false;
+  let thumbnailRebuildBusy = false;
+  let thumbnailRebuildConfirmOpen = false;
+  let thumbnailRebuildVaultId = '';
+  let thumbnailRebuildResult: { checked: number; generated: number; skipped: number; failed: number } | null = null;
   let healthReport: any = null;
   let healthDetailsOpen = false;
   let repairConfirmOpen = false;
@@ -570,7 +575,7 @@
   }
 
   async function auditVaultHealth() {
-    if (!healthVaultId || healthBusy) return;
+    if (!healthVaultId || healthBusy || thumbnailRebuildBusy) return;
     healthBusy = true;
     healthReport = null;
     healthDetailsOpen = false;
@@ -603,12 +608,12 @@
   }
 
   async function repairVaultHealth() {
-    if (!healthVaultId || healthBusy) return;
+    if (!healthVaultId || healthBusy || thumbnailRebuildBusy) return;
     repairConfirmOpen = true;
   }
 
   async function executeRepairVaultHealth() {
-    if (!healthVaultId || healthBusy) return;
+    if (!healthVaultId || healthBusy || thumbnailRebuildBusy) return;
     repairConfirmOpen = false;
     healthBusy = true;
     try {
@@ -639,6 +644,47 @@
       uiLog('ERROR', 'Vault repair failed', { vault: healthVaultId, error: errMsg });
     } finally {
       healthBusy = false;
+    }
+  }
+
+  function requestThumbnailRebuild() {
+    if (!healthVaultId || healthVaultId !== vaultActive || healthBusy || thumbnailRebuildBusy) return;
+    thumbnailRebuildVaultId = healthVaultId;
+    thumbnailRebuildConfirmOpen = true;
+  }
+
+  async function executeThumbnailRebuild() {
+    if (!thumbnailRebuildVaultId || thumbnailRebuildBusy) return;
+    const id = thumbnailRebuildVaultId;
+    thumbnailRebuildConfirmOpen = false;
+    thumbnailRebuildBusy = true;
+    thumbnailRebuildResult = null;
+    try {
+      const payload = await rebuildVaultThumbnailsApi(id);
+      const stats = payload?.thumbnails || {};
+      thumbnailRebuildResult = {
+        checked: Number(stats.checked) || 0,
+        generated: Number(stats.generated) || 0,
+        skipped: Number(stats.skipped) || 0,
+        failed: Number(stats.failed) || 0
+      };
+      const summary = `${thumbnailRebuildResult.generated} generated, ${thumbnailRebuildResult.skipped} skipped, ${thumbnailRebuildResult.failed} failed`;
+      toastStore.add({
+        type: thumbnailRebuildResult.failed > 0 ? 'error' : 'success',
+        title: thumbnailRebuildResult.failed > 0 ? 'Thumbnail Rebuild Finished with Errors' : 'Thumbnail Rebuild Complete',
+        message: summary
+      });
+      uiLog(thumbnailRebuildResult.failed > 0 ? 'WARNING' : 'INFO', 'Vault thumbnail rebuild completed', {
+        vault: id,
+        ...thumbnailRebuildResult
+      });
+    } catch (error) {
+      const errMsg = String(error);
+      toastStore.add({ type: 'error', title: 'Thumbnail Rebuild Failed', message: errMsg });
+      uiLog('ERROR', 'Vault thumbnail rebuild failed', { vault: id, error: errMsg });
+    } finally {
+      thumbnailRebuildBusy = false;
+      thumbnailRebuildVaultId = '';
     }
   }
 
@@ -1068,11 +1114,14 @@
         {vaultActive}
         bind:healthVaultId
         {healthBusy}
+        {thumbnailRebuildBusy}
+        {thumbnailRebuildResult}
         {healthReport}
         bind:healthDetailsOpen
         {repairErrors}
         onAuditVaultHealth={auditVaultHealth}
         onRepairVaultHealth={repairVaultHealth}
+        onRebuildThumbnails={requestThumbnailRebuild}
       />
       <SettingsVaultPackagesPanel
         {healthVaultId}
@@ -1126,6 +1175,24 @@
   </ConfirmationModal>
 
   <ConfirmationModal
+    open={thumbnailRebuildConfirmOpen}
+    title="Rebuild Thumbnails"
+    confirmLabel="Rebuild"
+    busy={thumbnailRebuildBusy}
+    on:cancel={() => thumbnailRebuildConfirmOpen = false}
+    on:confirm={executeThumbnailRebuild}
+  >
+    <div class="confirm-info-box">
+      <span class="warning-icon">
+        <IconAlertTriangle size={14} />
+      </span>
+      <span class="warning-message">
+        Rebuild thumbnails for <code>{vaults.find((vault) => vault.id === thumbnailRebuildVaultId)?.name || thumbnailRebuildVaultId}</code>. Existing thumbnail cache files will not be cleared.
+      </span>
+    </div>
+  </ConfirmationModal>
+
+  <ConfirmationModal
     open={repairConfirmOpen}
     title="Repair Vault"
     confirmLabel="Repair"
@@ -1158,9 +1225,9 @@
       </span>
       <span class="warning-message">
         {#if packageConfirmKind === 'backup'}
-          Create a full restore snapshot for <code>{packageConfirmVaultId}</code>.
+          Back up <code>{packageConfirmVaultId}</code>, including saved model predictions and scores. LMZ edits are paused until the backup finishes. Thumbnails are regenerated after restore.
         {:else}
-          Create a portable export package for <code>{packageConfirmVaultId}</code>.
+          Export media and notes for <code>{packageConfirmVaultId}</code>. Tags saved in notes are included; raw model predictions and scores are not.
         {/if}
       </span>
     </div>
